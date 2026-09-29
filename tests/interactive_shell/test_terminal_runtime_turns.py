@@ -328,6 +328,65 @@ def test_cancelled_turn_does_not_block_asyncio_runner_shutdown(
         runner.join(timeout=1)
 
 
+@pytest.mark.asyncio
+async def test_cancelled_turn_does_not_spawn_another_worker_until_it_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation cannot accumulate raw threads behind a stuck turn."""
+    import threading
+
+    from surfaces.interactive_shell.runtime import shell_turn_execution
+
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def _execute(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            release_first.wait()
+        else:
+            second_started.set()
+
+    monkeypatch.setattr(shell_turn_execution, "execute_shell_turn", _execute)
+    runtime = AgentTurnResources(
+        session=Session(),
+        state=ReplState(),
+        spinner=SpinnerState(),
+        invalidate_prompt=lambda: None,
+        console=Console(file=io.StringIO(), force_terminal=False, highlight=False),
+    )
+    first = asyncio.create_task(run_agent_turn(runtime, "first"))
+    second: asyncio.Task[None] | None = None
+    try:
+        while not first_started.is_set():
+            await asyncio.sleep(0.001)
+        first.cancel()
+        _ = await asyncio.gather(first, return_exceptions=True)
+
+        second = asyncio.create_task(run_agent_turn(runtime, "second"))
+        await asyncio.sleep(0.1)
+        assert calls == 1
+        assert not second_started.is_set()
+
+        release_first.set()
+        await asyncio.wait_for(second, timeout=1)
+        assert calls == 2
+        assert second_started.is_set()
+    finally:
+        release_first.set()
+        first.cancel()
+        if second is not None:
+            second.cancel()
+        _ = await asyncio.gather(
+            *(task for task in (first, second) if task is not None),
+            return_exceptions=True,
+        )
+
+
 def test_run_harness_turn_nitro_prompt_uses_cli_agent_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

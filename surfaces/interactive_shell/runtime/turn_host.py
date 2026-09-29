@@ -17,7 +17,7 @@ import functools
 import logging
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
@@ -71,6 +71,29 @@ from surfaces.shared.terminal.output.console_state import set_turn_spinner
 from surfaces.shared.terminal.output.repl_progress import repl_safe_progress_scope
 
 _logger = logging.getLogger(__name__)
+_TURN_SLOT_POLL_SECONDS = 0.05
+
+
+class _DaemonTurnSlot:
+    """Allow at most one live blocking worker per interactive runtime."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._available = True
+
+    async def claim(self) -> None:
+        """Wait interruptibly until no earlier worker remains alive."""
+        while True:
+            with self._lock:
+                if self._available:
+                    self._available = False
+                    return
+            await asyncio.sleep(_TURN_SLOT_POLL_SECONDS)
+
+    def release(self) -> None:
+        """Allow the next queued turn to create its worker."""
+        with self._lock:
+            self._available = True
 
 
 def _complete_daemon_turn(
@@ -86,8 +109,12 @@ def _complete_daemon_turn(
         future.set_result(None)
 
 
-async def _run_daemon_turn(work: Callable[[], object]) -> None:
+async def _run_daemon_turn(
+    work: Callable[[], object],
+    slot: _DaemonTurnSlot,
+) -> None:
     """Run blocking turn work without making event-loop shutdown wait for it."""
+    await slot.claim()
     loop = asyncio.get_running_loop()
     future: asyncio.Future[None] = loop.create_future()
     context = contextvars.copy_context()
@@ -101,6 +128,7 @@ async def _run_daemon_turn(work: Callable[[], object]) -> None:
         except Exception as exc:
             error = exc
         finally:
+            slot.release()
             if not completed and error is None:
                 error = RuntimeError("Interactive turn worker stopped unexpectedly")
             # A forced shell exit may close the event loop while detached work
@@ -108,11 +136,16 @@ async def _run_daemon_turn(work: Callable[[], object]) -> None:
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(_complete_daemon_turn, future, error)
 
-    threading.Thread(
+    worker = threading.Thread(
         target=_worker,
         name="opensre-interactive-turn",
         daemon=True,
-    ).start()
+    )
+    try:
+        worker.start()
+    except Exception:
+        slot.release()
+        raise
     await future
 
 
@@ -131,6 +164,11 @@ class AgentTurnResources:
     console: Console | None = None
     #: Session-scoped turn host; each turn binds its own streaming console.
     turn_handler: TurnRunner | None = None
+    _turn_slot: _DaemonTurnSlot = field(
+        default_factory=_DaemonTurnSlot,
+        repr=False,
+        compare=False,
+    )
 
 
 def _confirm_via_prompt(runtime: AgentTurnResources, prompt: str) -> str:
@@ -322,7 +360,8 @@ async def _run_agent_turn_loop(
                     is_tty=None,
                     request_exit=runtime.request_exit,
                     handler=runtime.turn_handler,
-                )
+                ),
+                runtime._turn_slot,
             )
     except asyncio.CancelledError:
         await emit(AgentEvent(type="turn_interrupted"))
