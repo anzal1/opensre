@@ -185,7 +185,7 @@ async def test_queued_literal_quit_requests_runtime_exit(
     # Match ``test_commands.py``: real ``/quit`` can flush PostHog; under xdist +
     # coverage that network drain has hung CI workers for the full job timeout.
     monkeypatch.setattr(
-        "surfaces.interactive_shell.command_registry.system._flush_analytics_on_exit",
+        "surfaces.interactive_shell.runtime.exit_control._flush_analytics_on_exit",
         lambda _console: None,
     )
     from surfaces.interactive_shell.runtime.core.state import ReplState
