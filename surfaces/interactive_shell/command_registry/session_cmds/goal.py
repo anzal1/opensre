@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.markup import escape as _rich_escape
 
 from core.agent_harness import SessionManager
+from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.session_goal import (
     MAX_GOAL_CONDITION_CHARS,
     SESSION_GOAL_UNBOUNDED_TURNS,
@@ -38,6 +39,7 @@ from core.agent_harness.spi.session_state import (
 from infrastructure.evidence.evidence_compaction import truncate_message
 from infrastructure.terminal.theme import DIM, ERROR, HIGHLIGHT
 from surfaces.interactive_shell.runtime import Session
+from surfaces.interactive_shell.runtime.goal_controls import consume_inflight_goal_control
 from surfaces.shared.terminal.components.rendering import print_repl_text
 
 _USAGE = "/goal [show|set|pause|resume|edit|clear|help]  or  /goal <condition>"
@@ -151,20 +153,11 @@ def _print_goal_block(session: Session, console: Console, goal: SessionGoal) -> 
         terminal.goal_paint_signature = goal_paint_signature(goal)
 
 
-def _consume_inflight_goal_pause(session: Session) -> bool:
-    """Return whether this command follows an in-flight pause boundary."""
-    terminal = session_terminal(session)
-    if terminal is None:
-        return False
-    pending = getattr(terminal, "pending_inflight_goal_pauses", 0)
-    if pending <= 0:
-        return False
-    terminal.pending_inflight_goal_pauses = pending - 1
-    return True
-
-
 def _pause(session: Session, console: Console) -> bool:
-    follows_inflight_pause = _consume_inflight_goal_pause(session)
+    follows_inflight_pause = consume_inflight_goal_control(
+        session,
+        HostCancelReason.GOAL_PAUSE,
+    )
     goal = getattr(session, "session_goal", None)
     if not isinstance(goal, SessionGoal) or not session_goal_is_active(session):
         if isinstance(goal, SessionGoal) and session_goal_is_paused(session):
@@ -253,9 +246,17 @@ def _edit(session: Session, console: Console, args: list[str]) -> bool:
 
 
 def _clear(session: Session, console: Console) -> bool:
+    follows_inflight_clear = consume_inflight_goal_control(
+        session,
+        HostCancelReason.GOAL_CLEAR,
+    )
     if getattr(session, "session_goal", None) is None:
+        if follows_inflight_clear:
+            console.print(f"[{HIGHLIGHT}]goal cleared.[/]")
+            return True
         console.print(f"[{DIM}]no goal to clear.[/]")
         return True
+    clear_pending_autosubmit(session)
     clear_session_goal(session)
     _persist_goal_state(session)
     console.print(f"[{HIGHLIGHT}]goal cleared.[/]")

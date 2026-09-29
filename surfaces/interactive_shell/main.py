@@ -12,7 +12,6 @@ from rich.console import Console
 
 from config.repl_config import ReplConfig
 from core.agent_harness import SessionManager
-from core.agent_harness.spi.session_goal import pause_active_session_goal
 from infrastructure.analytics.capture import capture_interactive_shell_rendered
 from infrastructure.analytics.github_identity import identify_saved_github_username
 from infrastructure.analytics.usage_context import claim_process_session_id
@@ -22,6 +21,7 @@ from infrastructure.turn_host.session_lock import session_execution_lock
 from surfaces.interactive_shell.controller import InteractiveShellController
 from surfaces.interactive_shell.runtime.context import create_repl_runtime
 from surfaces.interactive_shell.runtime.core.state import ReplState
+from surfaces.interactive_shell.runtime.goal_controls import apply_goal_control
 from surfaces.interactive_shell.runtime.startup.account_gate import (
     pass_sign_in_gate,
 )
@@ -50,13 +50,13 @@ def _new_shell_session() -> Session:
 
 
 def _close_repl_session(session: Session, state: ReplState) -> None:
-    """Persist final session state, including an interrupted goal-pause boundary."""
-    pause_requested = state.is_goal_pause_requested()
+    """Persist final session state, including an interrupted goal boundary."""
+    goal_control = state.requested_goal_control()
     manager = SessionManager.for_session(session)
     with session_execution_lock(session.session_id):
         manager.refresh_from_storage(session)
-        if pause_requested:
-            pause_active_session_goal(session)
+        if goal_control is not None:
+            apply_goal_control(session, goal_control)
         manager.close(session)
 
 

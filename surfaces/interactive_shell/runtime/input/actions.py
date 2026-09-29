@@ -6,6 +6,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.prompt_chrome import strip_shell_prompt_chrome
 from surfaces.interactive_shell.runtime.core.turn_detection import (
     looks_like_cancel_request,
@@ -28,14 +29,32 @@ class InflightControl(enum.StrEnum):
 
     CANCEL_TURN = "cancel_turn"
     PAUSE_GOAL = "pause_goal"
+    CLEAR_GOAL = "clear_goal"
+    EXIT_SHELL = "exit_shell"
+
+
+_GOAL_CONTROL_REASONS: dict[InflightControl, HostCancelReason] = {
+    InflightControl.PAUSE_GOAL: HostCancelReason.GOAL_PAUSE,
+    InflightControl.CLEAR_GOAL: HostCancelReason.GOAL_CLEAR,
+}
+
+
+def goal_control_reason(control: InflightControl) -> HostCancelReason | None:
+    """Return the host reason for an in-flight goal control, if any."""
+    return _GOAL_CONTROL_REASONS.get(control)
 
 
 def _inflight_control(text: str) -> InflightControl | None:
     """Resolve an exact literal control without inferring natural-language intent."""
     if looks_like_cancel_request(text):
         return InflightControl.CANCEL_TURN
-    if text.lower().split() == ["/goal", "pause"]:
+    parts = text.lower().split()
+    if parts == ["/goal", "pause"]:
         return InflightControl.PAUSE_GOAL
+    if parts in (["/goal", "clear"], ["/goal", "unset"]):
+        return InflightControl.CLEAR_GOAL
+    if parts in (["/exit"], ["/quit"]):
+        return InflightControl.EXIT_SHELL
     return None
 
 
@@ -130,4 +149,5 @@ __all__ = [
     "ShellInputSnapshot",
     "SubmitTurn",
     "decide_input_action",
+    "goal_control_reason",
 ]

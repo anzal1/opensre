@@ -13,6 +13,7 @@ from prompt_toolkit.application.current import get_app_or_none
 from core.agent_harness.spi.cancel import (
     HostCancelEvent,
     HostCancelReason,
+    is_goal_control_reason,
     turn_cancel_reason,
 )
 from infrastructure.terminal import theme as ui_theme
@@ -129,22 +130,31 @@ class ReplState:
     def is_cancelling(self) -> bool:
         return self.phase is TurnPhase.CANCELLING
 
-    def is_goal_pause_requested(self) -> bool:
-        return turn_cancel_reason(self.current_cancel_event) is HostCancelReason.GOAL_PAUSE
+    def requested_goal_control(self) -> HostCancelReason | None:
+        """Return the pending goal-boundary control for the active dispatch."""
+        reason = turn_cancel_reason(self.current_cancel_event)
+        return reason if is_goal_control_reason(reason) else None
 
-    def request_goal_pause(self, *, interrupt: bool = True) -> None:
-        """Mark this dispatch as a goal pause and optionally stop current work.
+    def request_goal_control(
+        self,
+        reason: HostCancelReason,
+        *,
+        interrupt: bool = True,
+    ) -> None:
+        """Record a goal-boundary control and optionally stop current work.
 
         The reason lives on the canonical turn-cancel event. When the current
         action has not attached a goal yet, retain that reason without setting
-        the event so the action may finish and the new goal can be paused at
+        the event so the action may finish and the new goal can be controlled at
         the next safe boundary.
         """
+        if not is_goal_control_reason(reason):
+            raise ValueError(f"Not a goal control reason: {reason}")
         cancel = self.current_cancel_event
         if cancel is None and self.is_dispatch_running():
             cancel = self.ensure_current_cancel_event()
         if isinstance(cancel, HostCancelEvent):
-            cancel.request(HostCancelReason.GOAL_PAUSE, interrupt=interrupt)
+            cancel.request(reason, interrupt=interrupt)
         elif interrupt and cancel is not None:
             cancel.set()
         if interrupt and (
@@ -231,9 +241,11 @@ class ReplState:
 
     def clear_current_task(self, task: asyncio.Task[None] | None = None) -> None:
         if task is None or self.current_task is task:
-            preserve_goal_pause = self.exit_requested and self.is_goal_pause_requested()
+            preserve_goal_control = (
+                self.exit_requested and self.requested_goal_control() is not None
+            )
             self.current_task = None
-            if not preserve_goal_pause:
+            if not preserve_goal_control:
                 self.current_cancel_event = None
             self.phase = TurnPhase.IDLE
 

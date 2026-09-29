@@ -79,6 +79,35 @@ def test_decide_routes_goal_pause_as_an_inflight_control() -> None:
     )
 
 
+@pytest.mark.parametrize("text", ["/goal clear", " /goal unset "])
+def test_decide_routes_goal_clear_as_an_inflight_control(text: str) -> None:
+    action = _decide(
+        InputSubmitted(text),
+        dispatch_running=True,
+        needs_exclusive_stdin=True,
+    )
+
+    assert isinstance(action, RunInflightControl)
+    assert action.control.value == "clear_goal"
+
+
+@pytest.mark.parametrize("text", ["/exit", " /quit "])
+def test_decide_routes_exit_as_an_inflight_control(text: str) -> None:
+    action = _decide(
+        InputSubmitted(text),
+        dispatch_running=True,
+        needs_exclusive_stdin=True,
+    )
+
+    assert isinstance(action, RunInflightControl)
+    assert action.control.value == "exit_shell"
+
+
+@pytest.mark.parametrize("text", ["/goal clear now", "/exit now", "please /quit"])
+def test_inflight_controls_require_an_exact_literal(text: str) -> None:
+    assert _decide(InputSubmitted(text), dispatch_running=True) == SubmitTurn(text=text)
+
+
 def test_decide_delivers_stripped_confirmation_answer() -> None:
     assert _decide(
         InputSubmitted(" yes "),
@@ -227,10 +256,54 @@ async def test_cancelling_a_running_turn_keeps_its_skill_and_plan() -> None:
         _ = await asyncio.gather(task, return_exceptions=True)
 
 
-def test_requesting_goal_pause_soft_cancels_the_running_turn() -> None:
+@pytest.mark.asyncio
+async def test_exit_control_stops_the_running_dispatch_without_queueing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import asyncio
 
     from core.agent_harness.spi.cancel import HostCancelEvent
+
+    flushed: list[bool] = []
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.runtime.exit_control._flush_analytics_on_exit",
+        lambda _console: flushed.append(True),
+    )
+    controller = _controller()
+
+    async def _hold() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_hold())
+    cancel = HostCancelEvent()
+    controller.state.start_dispatch(task=task, cancel_event=cancel)
+    try:
+        kept = await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.EXIT_SHELL,
+                submitted_text="/exit",
+            )
+        )
+
+        assert kept is False
+        assert controller.state.exit_requested
+        assert cancel.is_set()
+        assert controller.state.queue.empty()
+        assert flushed == []
+
+        await controller._shutdown_runtime()
+
+        assert flushed == [True]
+    finally:
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("reason_name", ["GOAL_PAUSE", "GOAL_CLEAR"])
+def test_requesting_goal_control_soft_cancels_the_running_turn(reason_name: str) -> None:
+    import asyncio
+
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
     from surfaces.interactive_shell.runtime.core.state import ReplState
 
     async def _scenario() -> None:
@@ -243,9 +316,10 @@ def test_requesting_goal_pause_soft_cancels_the_running_turn() -> None:
         task = asyncio.create_task(_hold())
         state.start_dispatch(task=task, cancel_event=cancel_event)
         try:
-            state.request_goal_pause()
+            reason = HostCancelReason[reason_name]
+            state.request_goal_control(reason)
 
-            assert state.is_goal_pause_requested()
+            assert state.requested_goal_control() is reason
             assert cancel_event.is_set()
             assert not task.cancelled()
         finally:
@@ -263,7 +337,7 @@ def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns(
         SessionGoalStatus,
         attach_session_goal,
     )
-    from core.agent_harness.spi.cancel import HostCancelEvent
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
     from surfaces.interactive_shell.runtime.turn_host import run_agent_turn_queue
 
     async def _scenario() -> None:
@@ -288,7 +362,9 @@ def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns(
         async def _run_turn(text: str) -> None:
             submitted.append(text)
             if text == "earlier queued turn":
-                pause_seen.append(controller.state.is_goal_pause_requested())
+                pause_seen.append(
+                    controller.state.requested_goal_control() is HostCancelReason.GOAL_PAUSE
+                )
                 goal = controller.session.session_goal
                 assert goal is not None
                 goal_seen.append((goal.status, goal.completed))
@@ -312,7 +388,7 @@ def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns(
             run_agent_turn_queue(
                 state=controller.state,
                 run_turn=_run_turn,
-                on_goal_pause=controller._apply_goal_pause_at_turn_boundary,
+                on_goal_control=controller._apply_goal_control_at_turn_boundary,
             )
         )
         try:
@@ -328,7 +404,9 @@ def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns(
             )
 
             assert kept is True
-            assert controller.session.terminal.pending_inflight_goal_pauses == 1
+            assert controller.session.terminal.pending_inflight_goal_controls == {
+                HostCancelReason.GOAL_PAUSE.value: 1
+            }
             assert cancel_events[0].is_set()
             assert controller.session.session_goal is not None
             assert controller.session.session_goal.status == SessionGoalStatus.ACTIVE
@@ -391,7 +469,7 @@ async def test_goal_pause_after_dispatch_finish_still_pauses_before_queued_work(
         run_agent_turn_queue(
             state=controller.state,
             run_turn=_run_turn,
-            on_goal_pause=controller._apply_goal_pause_at_turn_boundary,
+            on_goal_control=controller._apply_goal_control_at_turn_boundary,
         )
     )
 
@@ -431,6 +509,69 @@ async def test_goal_pause_after_dispatch_finish_still_pauses_before_queued_work(
 
 
 @pytest.mark.asyncio
+async def test_goal_clear_applies_before_already_queued_work() -> None:
+    import asyncio
+
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
+    from surfaces.interactive_shell.runtime.turn_host import run_agent_turn_queue
+
+    controller = _controller()
+    attach_session_goal(
+        controller.session,
+        SessionGoal(condition="keep going", max_outer_turns=4),
+    )
+    started = asyncio.Event()
+    finish_current_turn = asyncio.Event()
+    submitted: list[str] = []
+    goals_before_queued_turns: list[object] = []
+
+    async def _run_turn(text: str) -> None:
+        submitted.append(text)
+        if text == "current goal turn":
+            started.set()
+            await finish_current_turn.wait()
+            return
+        goals_before_queued_turns.append(controller.session.session_goal)
+
+    worker = asyncio.create_task(
+        run_agent_turn_queue(
+            state=controller.state,
+            run_turn=_run_turn,
+            on_goal_control=controller._apply_goal_control_at_turn_boundary,
+        )
+    )
+    try:
+        await controller.state.queue.put("current goal turn")
+        await started.wait()
+        await controller.state.queue.put("earlier queued turn")
+
+        kept = await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.CLEAR_GOAL,
+                submitted_text="/goal clear",
+            )
+        )
+
+        assert kept is True
+        cancel = controller.state.current_cancel_event
+        assert isinstance(cancel, HostCancelEvent)
+        assert cancel.reason is HostCancelReason.GOAL_CLEAR
+        assert cancel.is_set()
+
+        finish_current_turn.set()
+        await asyncio.wait_for(controller.state.queue.join(), timeout=1)
+
+        assert controller.session.session_goal is None
+        assert submitted == ["current goal turn", "earlier queued turn", "/goal clear"]
+        assert goals_before_queued_turns == [None, None]
+    finally:
+        controller.state.request_exit()
+        await controller.state.queue.put("")
+        await worker
+
+
+@pytest.mark.asyncio
 async def test_cancelled_goal_pause_boundary_does_not_wait_for_worker_lease() -> None:
     import asyncio
     import threading
@@ -442,6 +583,7 @@ async def test_cancelled_goal_pause_boundary_does_not_wait_for_worker_lease() ->
         attach_session_goal,
     )
     from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
+    from core.agent_harness.spi.cancel import HostCancelReason
     from infrastructure.turn_host.session_lock import session_execution_lock
     from surfaces.interactive_shell.controller import InteractiveShellController
     from surfaces.interactive_shell.session import Session
@@ -468,7 +610,9 @@ async def test_cancelled_goal_pause_boundary_does_not_wait_for_worker_lease() ->
     worker.start()
     await asyncio.to_thread(lease_acquired.wait)
     try:
-        pause_task = asyncio.create_task(controller._apply_goal_pause_at_turn_boundary())
+        pause_task = asyncio.create_task(
+            controller._apply_goal_control_at_turn_boundary(HostCancelReason.GOAL_PAUSE)
+        )
         await asyncio.sleep(0)
 
         assert session.session_goal is not None
@@ -481,7 +625,7 @@ async def test_cancelled_goal_pause_boundary_does_not_wait_for_worker_lease() ->
         release_lease.set()
         await asyncio.to_thread(worker.join, 1)
         assert not worker.is_alive()
-        await controller._apply_goal_pause_at_turn_boundary()
+        await controller._apply_goal_control_at_turn_boundary(HostCancelReason.GOAL_PAUSE)
 
         assert session.session_goal.status == SessionGoalStatus.PAUSED
         records = [
@@ -506,7 +650,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
     from core.agent_harness.session import InMemorySessionStore, SessionManager
     from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
     from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
-    from core.agent_harness.spi.cancel import HostCancelEvent
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
     from infrastructure.turn_host.session_lock import session_execution_lock
     from surfaces.interactive_shell.controller import InteractiveShellController
     from surfaces.interactive_shell.main import _close_repl_session
@@ -542,9 +686,9 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
         finally:
             controller.state.finish_dispatch(turn_cancel)
 
-    async def _on_goal_pause() -> None:
+    async def _on_goal_control(reason: HostCancelReason) -> None:
         boundary_started.set()
-        await controller._apply_goal_pause_at_turn_boundary()
+        await controller._apply_goal_control_at_turn_boundary(reason)
 
     lease_worker = threading.Thread(target=_hold_worker_lease)
     lease_worker.start()
@@ -553,7 +697,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
         run_agent_turn_queue(
             state=controller.state,
             run_turn=_run_turn,
-            on_goal_pause=_on_goal_pause,
+            on_goal_control=_on_goal_control,
         )
     )
     try:
@@ -561,7 +705,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
         await turn_started.wait()
         cancel = controller.state.current_cancel_event
         assert isinstance(cancel, HostCancelEvent)
-        controller.state.request_goal_pause()
+        controller.state.request_goal_control(HostCancelReason.GOAL_PAUSE)
         controller.state.request_exit()
         controller.state.cancel_current_dispatch()
         await boundary_started.wait()
@@ -570,7 +714,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
         with contextlib.suppress(asyncio.CancelledError):
             await queue_worker
 
-        assert controller.state.is_goal_pause_requested()
+        assert controller.state.requested_goal_control() is HostCancelReason.GOAL_PAUSE
         release_lease.set()
         await asyncio.to_thread(lease_worker.join, 1)
         assert not lease_worker.is_alive()
@@ -590,6 +734,41 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
             queue_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await queue_worker
+
+
+def test_shutdown_persists_a_pending_goal_clear() -> None:
+    from core.agent_harness.session import InMemorySessionStore, SessionManager
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
+    from surfaces.interactive_shell.main import _close_repl_session
+    from surfaces.interactive_shell.runtime.core.state import ReplState
+    from surfaces.interactive_shell.session import Session
+
+    store = InMemorySessionStore()
+    session = Session(store=store)
+    store.open_session(session)
+    store.append_turn(session, "chat", "seed")
+    attach_session_goal(
+        session,
+        SessionGoal(condition="keep going", max_outer_turns=4),
+    )
+    SessionManager.for_session(session).flush(session)
+    state = ReplState()
+    cancel = HostCancelEvent()
+    cancel.request(HostCancelReason.GOAL_CLEAR)
+    state.attach_cancel_event(cancel)
+    state.request_exit()
+
+    _close_repl_session(session, state)
+
+    records = [
+        record
+        for record in store.read(session.session_id)
+        if record.get("type") == "custom_message"
+        and record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
+    ]
+    assert records[-1].get("content", {}).get("session_goal") is None
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,11 @@ from rich.console import Console
 if TYPE_CHECKING:
     from infrastructure.turn_host.turn_runner import TurnRunner
 
-from core.agent_harness.spi.cancel import HostCancelReason, turn_cancel_reason
+from core.agent_harness.spi.cancel import (
+    HostCancelReason,
+    is_goal_control_reason,
+    turn_cancel_reason,
+)
 from core.llm.shared.llm_retry import OpenSRECreditsExhaustedError
 from infrastructure.analytics.usage_context import UsageSurface, bound_usage_context
 from infrastructure.observability.trace.spans import (
@@ -335,7 +339,7 @@ async def run_agent_turn_queue(
     *,
     state: ReplState,
     run_turn: Callable[[str], Coroutine[Any, Any, None]],
-    on_goal_pause: Callable[[], Awaitable[None]] | None = None,
+    on_goal_control: Callable[[HostCancelReason], Awaitable[None]] | None = None,
 ) -> None:
     """Consume queued turns and run each one until exit."""
     while not state.exit_requested:
@@ -357,22 +361,34 @@ async def run_agent_turn_queue(
         except Exception as exc:
             _logger.debug("Queued turn task ended with exception: %s", exc)
         finally:
-            pause_cancel = None
+            goal_control_cancel = None
             try:
                 current_cancel = state.current_cancel_event
-                pause_cancel = next(
+                candidates = tuple(
+                    cancel
+                    for cancel in (turn_cancel, current_cancel)
+                    if is_goal_control_reason(turn_cancel_reason(cancel))
+                )
+                reason = next(
                     (
-                        cancel
-                        for cancel in (turn_cancel, current_cancel)
-                        if turn_cancel_reason(cancel) is HostCancelReason.GOAL_PAUSE
+                        candidate
+                        for candidate in (
+                            HostCancelReason.GOAL_CLEAR,
+                            HostCancelReason.GOAL_PAUSE,
+                        )
+                        if any(turn_cancel_reason(cancel) is candidate for cancel in candidates)
                     ),
                     None,
                 )
-                if pause_cancel is not None and on_goal_pause is not None:
-                    await on_goal_pause()
+                goal_control_cancel = next(
+                    (cancel for cancel in candidates if turn_cancel_reason(cancel) is reason),
+                    None,
+                )
+                if reason is not None and on_goal_control is not None:
+                    await on_goal_control(reason)
             finally:
-                if state.exit_requested and pause_cancel is not None:
-                    state.attach_cancel_event(pause_cancel)
+                if state.exit_requested and goal_control_cancel is not None:
+                    state.attach_cancel_event(goal_control_cancel)
                 state.clear_current_task()
                 state.queue.task_done()
 

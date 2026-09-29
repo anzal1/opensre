@@ -12,10 +12,8 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from config.repl_config import ReplConfig
-from core.agent_harness.spi.session_goal import (
-    pause_active_session_goal,
-    session_goal_is_active,
-)
+from core.agent_harness.spi.cancel import HostCancelReason
+from core.agent_harness.spi.session_goal import session_goal_is_active
 from core.agent_harness.spi.task_plan import discard_task_plan
 from core.domain.alerts import inbox as _alert_inbox
 from infrastructure.turn_host.session_lock import (
@@ -33,6 +31,11 @@ from surfaces.interactive_shell.runtime.core.state import (
     ReplState,
     SpinnerState,
 )
+from surfaces.interactive_shell.runtime.exit_control import finish_shell_exit
+from surfaces.interactive_shell.runtime.goal_controls import (
+    apply_goal_control,
+    mark_inflight_goal_control,
+)
 from surfaces.interactive_shell.runtime.input import (
     PromptInputReader,
 )
@@ -44,6 +47,7 @@ from surfaces.interactive_shell.runtime.input.actions import (
     InputAction,
     RunInflightControl,
     SubmitTurn,
+    goal_control_reason,
 )
 from surfaces.interactive_shell.runtime.loop_scheduler import (
     shutdown_loop_scheduler,
@@ -61,7 +65,7 @@ from surfaces.interactive_shell.ui.input_prompt.stdout import patch_prompt_stdou
 
 log = logging.getLogger(__name__)
 
-_GOAL_PAUSE_LOCK_RETRY_SECONDS = 0.1
+_GOAL_CONTROL_LOCK_RETRY_SECONDS = 0.1
 
 
 @contextmanager
@@ -222,6 +226,7 @@ class InteractiveShellController:
         self.background: BackgroundTaskPool | None = None
         self.tasks: list[tuple[str, asyncio.Task[None]]] = []
         self._ci_fix_status_cleanup: Callable[[], None] | None = None
+        self._finish_exit_on_shutdown = False
 
     async def start_interactive_shell(self) -> None:
         with _alert_listener(self.config, self.service_console, existing=self.inbox) as inbox:
@@ -259,7 +264,7 @@ class InteractiveShellController:
             lambda: run_agent_turn_queue(
                 state=self.state,
                 run_turn=lambda text: run_agent_turn(self.turn_runtime, text),
-                on_goal_pause=self._apply_goal_pause_at_turn_boundary,
+                on_goal_control=self._apply_goal_control_at_turn_boundary,
             )
         )
         # Fleet sampler is lazy: /fleet triggers it on first live use.
@@ -270,22 +275,31 @@ class InteractiveShellController:
             log.warning("Loop scheduler could not start: %s", exc)
         self._ci_fix_status_cleanup = bind_ci_fix_status(self.session.terminal)
 
-    def _try_pause_goal_after_worker_release(self) -> bool:
-        """Pause and persist if the turn worker has released session ownership."""
+    def _try_apply_goal_control_after_worker_release(
+        self,
+        reason: HostCancelReason,
+    ) -> bool:
+        """Apply and persist a goal control after the worker releases ownership."""
         from core.agent_harness import SessionManager
 
         try:
             with session_execution_lock(self.session.session_id, timeout=0):
-                if pause_active_session_goal(self.session) is not None:
+                if apply_goal_control(self.session, reason):
                     SessionManager.for_session(self.session).flush(self.session)
         except SessionExecutionBusyError:
             return False
         return True
 
-    async def _apply_goal_pause_at_turn_boundary(self) -> None:
-        """Serialize a durable pause without making shutdown wait on the worker."""
-        while not await asyncio.to_thread(self._try_pause_goal_after_worker_release):
-            await asyncio.sleep(_GOAL_PAUSE_LOCK_RETRY_SECONDS)
+    async def _apply_goal_control_at_turn_boundary(
+        self,
+        reason: HostCancelReason,
+    ) -> None:
+        """Serialize a durable goal control without blocking the event loop."""
+        while not await asyncio.to_thread(
+            self._try_apply_goal_control_after_worker_release,
+            reason,
+        ):
+            await asyncio.sleep(_GOAL_CONTROL_LOCK_RETRY_SECONDS)
 
     async def _handle_input_action(self, action: InputAction) -> bool:
         match action:
@@ -302,18 +316,27 @@ class InteractiveShellController:
                 self.state.cancel_current_dispatch()
                 return True
             case RunInflightControl(
-                control=InflightControl.PAUSE_GOAL,
+                control=InflightControl.EXIT_SHELL,
                 submitted_text=text,
             ):
+                self.prompt.render_submitted_prompt(self.echo_console, text)
+                self.state.request_exit()
+                self.state.cancel_current_dispatch()
+                self._finish_exit_on_shutdown = True
+                return False
+            case RunInflightControl(control=control, submitted_text=text) if (
+                reason := goal_control_reason(control)
+            ) is not None:
                 # Keep slash execution serialized through the normal turn
                 # queue, but signal current work now. The queue owner applies
                 # the state transition after the worker thread returns, before
                 # any already-queued input, so goal tools remain single-owner.
                 self.prompt.render_submitted_prompt(self.echo_console, text)
-                self.state.request_goal_pause(
+                self.state.request_goal_control(
+                    reason,
                     interrupt=session_goal_is_active(self.session),
                 )
-                self.session.terminal.pending_inflight_goal_pauses += 1
+                mark_inflight_goal_control(self.session, reason)
                 await self.state.queue.put(text)
                 return True
             case DeliverConfirmation(text=text):
@@ -375,6 +398,9 @@ class InteractiveShellController:
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 log.debug("%s task shutdown raised exception: %s", label, result)
         shutdown_loop_scheduler()
+        if self._finish_exit_on_shutdown:
+            self._finish_exit_on_shutdown = False
+            finish_shell_exit(self.session, self.service_console)
 
 
 __all__ = ["InteractiveShellController"]

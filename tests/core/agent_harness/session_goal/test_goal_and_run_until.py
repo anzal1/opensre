@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from core.agent_harness.session.session_core import SessionCore
 from core.agent_harness.session_goal.evaluate import evaluate_session_goal
 from core.agent_harness.session_goal.goal import (
@@ -672,7 +674,13 @@ def test_pause_wins_when_it_arrives_with_the_cancel_signal() -> None:
     assert outcome.goal.last_reason == SessionGoalReason.PAUSED_BY_USER
 
 
-def test_pause_reason_retained_during_turn_pauses_a_new_shell_goal() -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [HostCancelReason.GOAL_PAUSE, HostCancelReason.GOAL_CLEAR],
+)
+def test_goal_control_retained_during_turn_stops_a_new_shell_goal(
+    reason: HostCancelReason,
+) -> None:
     session = SessionCore()
     session.terminal = SimpleNamespace(
         pending_prompt_default="keep going",
@@ -690,7 +698,7 @@ def test_pause_reason_retained_during_turn_pauses_a_new_shell_goal() -> None:
                 host_owned=True,
             ),
         )
-        cancel.request(HostCancelReason.GOAL_PAUSE, interrupt=False)
+        cancel.request(reason, interrupt=False)
         return TurnResult(
             final_intent="cli_agent_handled",
             action_result=ToolCallingTurnResult(
