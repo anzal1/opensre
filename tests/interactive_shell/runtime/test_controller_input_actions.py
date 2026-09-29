@@ -360,6 +360,7 @@ async def test_exit_control_bounds_a_worker_that_ignores_cooperative_cancel(
         await asyncio.wait_for(controller._shutdown_runtime(), timeout=0.5)
 
         assert task.cancelled()
+        assert controller.state.has_detached_turn_worker()
         assert exit_finished == [True]
     finally:
         release_turn.set()
@@ -848,6 +849,23 @@ def test_shutdown_persists_a_pending_goal_clear() -> None:
         and record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
     ]
     assert records[-1].get("content", {}).get("session_goal") is None
+
+
+def test_shutdown_does_not_wait_for_a_detached_turn_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import surfaces.interactive_shell.main as main_entrypoint
+    from surfaces.interactive_shell.runtime.core.state import ReplState
+    from surfaces.interactive_shell.session import Session
+
+    def _unexpected_lock(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("detached turn teardown must not wait for the session lease")
+
+    state = ReplState()
+    state.mark_turn_worker_detached()
+    monkeypatch.setattr(main_entrypoint, "session_execution_lock", _unexpected_lock)
+
+    main_entrypoint._close_repl_session(Session(), state)
 
 
 @pytest.mark.asyncio

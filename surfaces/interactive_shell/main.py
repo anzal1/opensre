@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 from collections.abc import Callable
@@ -32,6 +33,8 @@ from surfaces.interactive_shell.ui.terminal_ui import render_terminal_ui
 from surfaces.shared.terminal.banner import animate_launch_wordmark
 from surfaces.shared.terminal.components.rendering import repl_clear_screen
 
+logger = logging.getLogger(__name__)
+
 # Fallback when a caller does not supply one. Forces a terminal because the
 # shell owns the screen; an embedding caller passes its own instead.
 _DEFAULT_CONSOLE = Console(
@@ -51,6 +54,11 @@ def _new_shell_session() -> Session:
 
 def _close_repl_session(session: Session, state: ReplState) -> None:
     """Persist final session state, including an interrupted goal boundary."""
+    if state.has_detached_turn_worker():
+        logger.warning(
+            "Skipping final session close because detached turn work still owns session state"
+        )
+        return
     goal_control = state.requested_goal_control()
     manager = SessionManager.for_session(session)
     with session_execution_lock(session.session_id):

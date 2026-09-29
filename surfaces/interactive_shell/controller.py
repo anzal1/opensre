@@ -405,6 +405,7 @@ class InteractiveShellController:
                 )
             except TimeoutError:
                 log.warning("In-flight exit turn did not drain before shutdown")
+                self.state.mark_turn_worker_detached()
                 self.state.cancel_current_dispatch()
                 await asyncio.gather(graceful_turn, return_exceptions=True)
             except asyncio.CancelledError:

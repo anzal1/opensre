@@ -261,6 +261,73 @@ def test_turn_end_retries_auto_command_deferred_during_dispatch(
     asyncio.run(_scenario())
 
 
+def test_cancelled_turn_does_not_block_asyncio_runner_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced exit must not leave work that ``asyncio.run`` waits to join."""
+    import threading
+
+    from infrastructure.analytics.usage_context import get_session_id, get_surface
+    from surfaces.interactive_shell.runtime import shell_turn_execution
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_context: dict[str, object] = {}
+    runner_errors: list[BaseException] = []
+
+    def _hold_turn(*_args: object, **_kwargs: object) -> None:
+        worker_context.update(
+            daemon=threading.current_thread().daemon,
+            session_id=get_session_id(),
+            surface=get_surface(),
+        )
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(shell_turn_execution, "execute_shell_turn", _hold_turn)
+    session = Session()
+
+    async def _scenario() -> None:
+        runtime = AgentTurnResources(
+            session=session,
+            state=ReplState(),
+            spinner=SpinnerState(),
+            invalidate_prompt=lambda: None,
+            console=Console(file=io.StringIO(), force_terminal=False, highlight=False),
+        )
+        task = asyncio.create_task(run_agent_turn(runtime, "blocking turn"))
+        deadline = asyncio.get_running_loop().time() + 1
+        while not started.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("turn worker did not start")
+            await asyncio.sleep(0.001)
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+
+    def _run_scenario() -> None:
+        try:
+            asyncio.run(_scenario())
+        except BaseException as exc:
+            runner_errors.append(exc)
+
+    runner = threading.Thread(target=_run_scenario, name="test-asyncio-run", daemon=True)
+    runner.start()
+    try:
+        runner.join(timeout=2)
+
+        assert not runner.is_alive(), "asyncio.run waited for the blocked turn worker"
+        assert runner_errors == []
+        assert worker_context == {
+            "daemon": True,
+            "session_id": session.session_id,
+            "surface": "cli",
+        }
+    finally:
+        release.set()
+        runner.join(timeout=1)
+
+
 def test_run_harness_turn_nitro_prompt_uses_cli_agent_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

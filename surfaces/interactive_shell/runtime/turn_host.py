@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import functools
 import logging
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
@@ -69,6 +71,46 @@ from surfaces.shared.terminal.output.console_state import set_turn_spinner
 from surfaces.shared.terminal.output.repl_progress import repl_safe_progress_scope
 
 _logger = logging.getLogger(__name__)
+
+
+def _complete_daemon_turn(
+    future: asyncio.Future[None],
+    error: BaseException | None,
+) -> None:
+    """Complete ``future`` unless its awaiting task was already cancelled."""
+    if future.done():
+        return
+    if error is not None:
+        future.set_exception(error)
+    else:
+        future.set_result(None)
+
+
+async def _run_daemon_turn(work: Callable[[], object]) -> None:
+    """Run blocking turn work without making event-loop shutdown wait for it."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[None] = loop.create_future()
+    context = contextvars.copy_context()
+
+    def _worker() -> None:
+        error: BaseException | None = None
+        try:
+            context.run(work)
+        except BaseException as exc:
+            error = exc
+        try:
+            loop.call_soon_threadsafe(_complete_daemon_turn, future, error)
+        except RuntimeError:
+            # A forced shell exit may close the event loop while detached work
+            # is still unwinding. There is no waiter left to notify in that case.
+            return
+
+    threading.Thread(
+        target=_worker,
+        name="opensre-interactive-turn",
+        daemon=True,
+    ).start()
+    await future
 
 
 @dataclass(frozen=True)
@@ -267,15 +309,17 @@ async def _run_agent_turn_loop(
                 session_id=runtime.session.session_id,
             ),
         ):
-            await asyncio.to_thread(
-                execute_shell_turn,
-                text,
-                runtime.session,
-                output,
-                confirm_fn=confirm,
-                is_tty=None,
-                request_exit=runtime.request_exit,
-                handler=runtime.turn_handler,
+            await _run_daemon_turn(
+                functools.partial(
+                    execute_shell_turn,
+                    text,
+                    runtime.session,
+                    output,
+                    confirm_fn=confirm,
+                    is_tty=None,
+                    request_exit=runtime.request_exit,
+                    handler=runtime.turn_handler,
+                )
             )
     except asyncio.CancelledError:
         await emit(AgentEvent(type="turn_interrupted"))

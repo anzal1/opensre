@@ -116,6 +116,7 @@ class ReplState:
     plan_step_texts: tuple[str, ...] | None = None
     phase: TurnPhase = TurnPhase.IDLE
     ctrl_c_exit_hint_until: float = 0.0
+    _detached_turn_worker: bool = False
 
     def is_dispatch_running(self) -> bool:
         return self.current_task is not None and not self.current_task.done()
@@ -181,6 +182,14 @@ class ReplState:
 
     def request_exit(self) -> None:
         self.exit_requested = True
+
+    def mark_turn_worker_detached(self) -> None:
+        """Record that forced exit abandoned blocking work outside the event loop."""
+        self._detached_turn_worker = True
+
+    def has_detached_turn_worker(self) -> bool:
+        """Return whether final teardown must avoid the worker-owned session lease."""
+        return self._detached_turn_worker
 
     def arm_ctrl_c_exit_hint(self, duration_seconds: float) -> None:
         """Show the double-press exit hint without restarting the prompt."""
