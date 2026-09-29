@@ -359,7 +359,8 @@ class InteractiveShellController:
                     reason,
                     interrupt=session_goal_is_active(self.session),
                 )
-                mark_inflight_goal_control(self.session, reason)
+                if self.state.requested_goal_control() is reason:
+                    mark_inflight_goal_control(self.session, reason)
                 await self.state.queue.put(text)
                 return True
             case DeliverConfirmation(text=text):

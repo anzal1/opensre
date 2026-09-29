@@ -486,6 +486,44 @@ def test_requesting_goal_control_soft_cancels_the_running_turn(reason_name: str)
     asyncio.run(_scenario())
 
 
+@pytest.mark.parametrize(
+    ("control", "command"),
+    [
+        (InflightControl.PAUSE_GOAL, "/goal pause"),
+        (InflightControl.CLEAR_GOAL, "/goal clear"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_goal_control_runs_normally_if_dispatch_finishes_before_handling(
+    control: InflightControl,
+    command: str,
+) -> None:
+    from core.agent_harness.session_goal.goal import (
+        SessionGoal,
+        attach_session_goal,
+        session_goal_is_paused,
+    )
+    from surfaces.interactive_shell.command_registry.dispatch import dispatch_slash
+
+    controller = _controller()
+    attach_session_goal(controller.session, SessionGoal(condition="keep going"))
+
+    kept = await controller._handle_input_action(
+        RunInflightControl(control=control, submitted_text=command)
+    )
+
+    assert kept is True
+    assert controller.session.terminal.pending_inflight_goal_controls == {}
+    queued = await controller.state.queue.get()
+    controller.state.queue.task_done()
+    assert queued == command
+    assert dispatch_slash(queued, controller.session, controller.service_console)
+    if control is InflightControl.PAUSE_GOAL:
+        assert session_goal_is_paused(controller.session)
+    else:
+        assert controller.session.session_goal is None
+
+
 def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns() -> None:
     import asyncio
 
