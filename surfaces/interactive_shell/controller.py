@@ -15,7 +15,6 @@ from rich.console import Console
 from config.repl_config import ReplConfig
 from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.session_goal import (
-    SessionGoal,
     apply_session_goal_control,
     session_goal_is_active,
 )
@@ -410,7 +409,6 @@ class InteractiveShellController:
         graceful_turn = self.state.current_task if self._finish_exit_on_shutdown else None
         detached_goal_control: HostCancelReason | None = None
         detached_goal_control_saved = False
-        detached_target_goal: SessionGoal | None = None
         detached_exit_command: str | None = None
         self.state.request_exit()
         if graceful_turn is not None:
@@ -429,7 +427,6 @@ class InteractiveShellController:
                 log.warning("In-flight exit turn did not drain before shutdown")
                 self.state.mark_turn_worker_detached()
                 detached_goal_control = self.state.requested_goal_control()
-                detached_target_goal = self.session.session_goal
                 if detached_goal_control is not None:
                     try:
                         self._persist_goal_control_for_resume(detached_goal_control)
@@ -474,7 +471,6 @@ class InteractiveShellController:
                     close_repl_session_after_detached_worker,
                     self.session,
                     None if detached_goal_control_saved else detached_goal_control,
-                    detached_target_goal,
                     detached_exit_command,
                 )
             )

@@ -44,15 +44,18 @@ class HostCancelReason(enum.StrEnum):
     GOAL_CLEAR = "goal_clear"
 
 
-_GOAL_CONTROL_PRIORITY: dict[HostCancelReason, int] = {
-    HostCancelReason.GOAL_PAUSE: 1,
-    HostCancelReason.GOAL_CLEAR: 2,
-}
+def _goal_control_priority(reason: HostCancelReason | None) -> int:
+    """Return goal-control precedence, or zero for ordinary cancellation."""
+    if reason is HostCancelReason.GOAL_PAUSE:
+        return 1
+    if reason is HostCancelReason.GOAL_CLEAR:
+        return 2
+    return 0
 
 
 def is_goal_control_reason(reason: HostCancelReason | None) -> bool:
     """Return whether ``reason`` requires a safe session-goal boundary."""
-    return reason in _GOAL_CONTROL_PRIORITY
+    return _goal_control_priority(reason) > 0
 
 
 class HostCancelEvent(threading.Event):
@@ -75,10 +78,8 @@ class HostCancelEvent(threading.Event):
             # Goal controls mutate post-turn state as well as interrupting the
             # current turn. Preserve them across a later generic stop, and let
             # a destructive clear supersede an earlier pause.
-            current_priority = (
-                _GOAL_CONTROL_PRIORITY.get(self._reason, 0) if self._reason is not None else 0
-            )
-            requested_priority = _GOAL_CONTROL_PRIORITY.get(reason, 0)
+            current_priority = _goal_control_priority(self._reason)
+            requested_priority = _goal_control_priority(reason)
             if requested_priority >= current_priority:
                 self._reason = reason
             if interrupt:

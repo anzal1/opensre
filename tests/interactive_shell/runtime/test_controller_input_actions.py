@@ -340,7 +340,7 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     worker_finished = threading.Event()
     exit_finished: list[bool] = []
     deferred_closes: list[object] = []
-    deferred_finalizations: list[tuple[object, object, object, object]] = []
+    deferred_finalizations: list[tuple[object, object, object]] = []
     monkeypatch.setattr(
         "surfaces.interactive_shell.controller._INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS",
         0.01,
@@ -357,10 +357,9 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     def _finalize_after_detach(
         session: object,
         fallback_goal_control: object,
-        target_goal: object,
         exit_command: object,
     ) -> None:
-        deferred_finalizations.append((session, fallback_goal_control, target_goal, exit_command))
+        deferred_finalizations.append((session, fallback_goal_control, exit_command))
 
     monkeypatch.setattr(
         type(controller.turn_runtime),
@@ -445,10 +444,9 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         assert callable(deferred_close)
         deferred_close()
         assert len(deferred_finalizations) == 1
-        finalized_session, fallback_control, target_goal, exit_command = deferred_finalizations[0]
+        finalized_session, fallback_control, exit_command = deferred_finalizations[0]
         assert finalized_session is controller.session
         assert fallback_control is None
-        assert isinstance(target_goal, SessionGoal)
         assert exit_command == "/exit"
     finally:
         release_turn.set()
@@ -1018,10 +1016,11 @@ def test_deferred_shutdown_does_not_apply_a_stale_control_to_a_replacement_goal(
         def close(self, _session: Session) -> None:
             events.append("close")
 
+    manager = _Manager()
     monkeypatch.setattr(
         session_shutdown.SessionManager,
         "for_session",
-        lambda _session: _Manager(),
+        lambda _session: manager,
     )
     monkeypatch.setattr(
         session_shutdown,
@@ -1032,7 +1031,6 @@ def test_deferred_shutdown_does_not_apply_a_stale_control_to_a_replacement_goal(
     session_shutdown.close_repl_session_after_detached_worker(
         session,
         HostCancelReason.GOAL_CLEAR,
-        target,
         None,
     )
 
@@ -1040,7 +1038,7 @@ def test_deferred_shutdown_does_not_apply_a_stale_control_to_a_replacement_goal(
     assert events == ["refresh", "close"]
 
 
-def test_deferred_shutdown_applies_fallback_control_to_the_same_goal(
+def test_deferred_shutdown_applies_fallback_control_to_the_workers_final_goal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from contextlib import nullcontext
@@ -1050,9 +1048,9 @@ def test_deferred_shutdown_applies_fallback_control_to_the_same_goal(
     from core.agent_harness.spi.cancel import HostCancelReason
     from surfaces.interactive_shell.session import Session
 
-    target = SessionGoal(condition="old goal", started_at=1.0)
+    worker_goal = SessionGoal(condition="late worker goal", started_at=1.0)
     session = Session()
-    attach_session_goal(session, target)
+    attach_session_goal(session, worker_goal)
     events: list[str] = []
 
     class _Manager:
@@ -1063,10 +1061,11 @@ def test_deferred_shutdown_applies_fallback_control_to_the_same_goal(
             assert closing.session_goal is None
             events.append("close")
 
+    manager = _Manager()
     monkeypatch.setattr(
         session_shutdown.SessionManager,
         "for_session",
-        lambda _session: _Manager(),
+        lambda _session: manager,
     )
     monkeypatch.setattr(
         session_shutdown,
@@ -1077,7 +1076,6 @@ def test_deferred_shutdown_applies_fallback_control_to_the_same_goal(
     session_shutdown.close_repl_session_after_detached_worker(
         session,
         HostCancelReason.GOAL_CLEAR,
-        target,
         None,
     )
 
@@ -1104,10 +1102,11 @@ def test_deferred_shutdown_records_exit_after_refresh_and_before_close(
             assert closing.history[-1]["text"] == "/exit"
             events.append("close")
 
+    manager = _Manager()
     monkeypatch.setattr(
         session_shutdown.SessionManager,
         "for_session",
-        lambda _session: _Manager(),
+        lambda _session: manager,
     )
     monkeypatch.setattr(
         session_shutdown,
@@ -1117,7 +1116,6 @@ def test_deferred_shutdown_records_exit_after_refresh_and_before_close(
 
     session_shutdown.close_repl_session_after_detached_worker(
         session,
-        None,
         None,
         "/exit",
     )

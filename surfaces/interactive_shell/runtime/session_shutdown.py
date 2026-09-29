@@ -34,21 +34,21 @@ def close_repl_session(session: Session, state: ReplState) -> None:
 def close_repl_session_after_detached_worker(
     session: Session,
     fallback_goal_control: HostCancelReason | None,
-    target_goal: SessionGoal | None,
     exit_command: str | None,
 ) -> None:
     """Finalize a session after its detached turn worker releases ownership."""
     manager = SessionManager.for_session(session)
     try:
         with session_execution_lock(session.session_id):
+            worker_goal = session.session_goal
             manager.refresh_from_storage(session)
             current_goal = session.session_goal
             if (
                 fallback_goal_control is not None
                 and isinstance(current_goal, SessionGoal)
-                and isinstance(target_goal, SessionGoal)
-                and current_goal.condition == target_goal.condition
-                and current_goal.started_at == target_goal.started_at
+                and isinstance(worker_goal, SessionGoal)
+                and current_goal.condition == worker_goal.condition
+                and current_goal.started_at == worker_goal.started_at
             ):
                 apply_session_goal_control(session, fallback_goal_control)
             if exit_command is not None:
