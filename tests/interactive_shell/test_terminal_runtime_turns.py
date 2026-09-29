@@ -387,6 +387,56 @@ async def test_cancelled_turn_does_not_spawn_another_worker_until_it_finishes(
         )
 
 
+@pytest.mark.asyncio
+async def test_cancelled_turn_runs_deferred_cleanup_after_its_worker_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextvars
+    import threading
+
+    from surfaces.interactive_shell.runtime import shell_turn_execution
+
+    started = threading.Event()
+    release = threading.Event()
+    cleaned_up = threading.Event()
+    callback_context = contextvars.ContextVar("callback_context", default="missing")
+    observed_context: list[str] = []
+
+    def _execute(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        release.wait()
+
+    def _cleanup() -> None:
+        observed_context.append(callback_context.get())
+        cleaned_up.set()
+
+    monkeypatch.setattr(shell_turn_execution, "execute_shell_turn", _execute)
+    runtime = AgentTurnResources(
+        session=Session(),
+        state=ReplState(),
+        spinner=SpinnerState(),
+        invalidate_prompt=lambda: None,
+        console=Console(file=io.StringIO(), force_terminal=False, highlight=False),
+    )
+    task = asyncio.create_task(run_agent_turn(runtime, "blocked"))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+        callback_context.set("registration")
+        runtime.run_after_turn_worker(_cleanup)
+        assert not cleaned_up.is_set()
+
+        release.set()
+        assert await asyncio.to_thread(cleaned_up.wait, 1)
+        assert observed_context == ["registration"]
+    finally:
+        release.set()
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
 def test_run_harness_turn_nitro_prompt_uses_cli_agent_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

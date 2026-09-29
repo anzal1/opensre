@@ -192,7 +192,7 @@ class InMemorySessionStore:
         records = self._files.get(session.session_id)
         if not records:
             return
-        trailing_leaf = records[-1].get("type") == "leaf"
+        trailing_leaf = self._conversation_tip_is_closed(records)
         if not trailing_leaf and not any(rec.get("type") != "session" for rec in records):
             from core.agent_harness.session.pending_choice import PendingUserChoice
 
@@ -400,3 +400,12 @@ class InMemorySessionStore:
             if rec.get("type") != "session":
                 return str(rec.get("id") or "") or None
         return None
+
+    @staticmethod
+    def _conversation_tip_is_closed(records: list[dict[str, Any]]) -> bool:
+        """Return whether the newest non-sidecar record is a closing leaf."""
+        for record in reversed(records):
+            if record.get("sidecar"):
+                continue
+            return record.get("type") == "leaf"
+        return False

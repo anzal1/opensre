@@ -337,7 +337,10 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
 
     worker_started = threading.Event()
     release_turn = threading.Event()
+    worker_finished = threading.Event()
     exit_finished: list[bool] = []
+    deferred_closes: list[object] = []
+    released_resources: list[bool] = []
     monkeypatch.setattr(
         "surfaces.interactive_shell.controller._INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS",
         0.01,
@@ -347,6 +350,22 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         lambda _session, _console: exit_finished.append(True),
     )
     controller = _controller()
+
+    def _capture_deferred_close(_runtime: object, callback: object) -> None:
+        deferred_closes.append(callback)
+
+    monkeypatch.setattr(
+        type(controller.turn_runtime),
+        "run_after_turn_worker",
+        _capture_deferred_close,
+    )
+    original_release_resources = controller.session.release_resources
+
+    def _release_resources() -> None:
+        original_release_resources()
+        released_resources.append(True)
+
+    monkeypatch.setattr(controller.session, "release_resources", _release_resources)
     store = InMemorySessionStore()
     controller.session.store = store
     store.open_session(controller.session)
@@ -362,6 +381,7 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     def _hold() -> None:
         worker_started.set()
         release_turn.wait()
+        worker_finished.set()
 
     task = asyncio.create_task(asyncio.to_thread(_hold))
     controller.state.start_dispatch(task=task, cancel_event=cancel)
@@ -380,6 +400,8 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         assert task.cancelled()
         assert controller.state.has_detached_turn_worker()
         assert exit_finished == [True]
+        assert len(deferred_closes) == 1
+        assert released_resources == []
         stored_records = store.read(controller.session.session_id)
         goal_records = [
             record
@@ -411,6 +433,14 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         assert restored.session_goal is None
         assert resumed_goal_records[-1].get("content", {}).get("session_goal") is None
         assert pending_session_goal_controls(resumed_records) == []
+
+        release_turn.set()
+        assert await asyncio.to_thread(worker_finished.wait, 1)
+        deferred_close = deferred_closes.pop()
+        assert callable(deferred_close)
+        deferred_close()
+        assert controller.session.session_goal is None
+        assert released_resources == [True]
     finally:
         release_turn.set()
         task.cancel()

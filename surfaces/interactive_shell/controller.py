@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 from collections.abc import Callable, Iterator
@@ -57,6 +58,9 @@ from surfaces.interactive_shell.runtime.input.actions import (
 from surfaces.interactive_shell.runtime.loop_scheduler import (
     shutdown_loop_scheduler,
     start_loop_scheduler,
+)
+from surfaces.interactive_shell.runtime.session_shutdown import (
+    close_repl_session_after_detached_worker,
 )
 from surfaces.interactive_shell.runtime.turn_host import (
     AgentTurnResources,
@@ -234,6 +238,7 @@ class InteractiveShellController:
         self._ci_fix_status_cleanup: Callable[[], None] | None = None
         self._finish_exit_on_shutdown = False
         self._inflight_exit_command: str | None = None
+        self._deferred_session_close_registered = False
 
     async def start_interactive_shell(self) -> None:
         with _alert_listener(self.config, self.service_console, existing=self.inbox) as inbox:
@@ -401,6 +406,7 @@ class InteractiveShellController:
             self._ci_fix_status_cleanup()
             self._ci_fix_status_cleanup = None
         graceful_turn = self.state.current_task if self._finish_exit_on_shutdown else None
+        detached_goal_control: HostCancelReason | None = None
         self.state.request_exit()
         if graceful_turn is not None:
             self.state.signal_current_dispatch()
@@ -417,10 +423,10 @@ class InteractiveShellController:
             except TimeoutError:
                 log.warning("In-flight exit turn did not drain before shutdown")
                 self.state.mark_turn_worker_detached()
-                goal_control = self.state.requested_goal_control()
-                if goal_control is not None:
+                detached_goal_control = self.state.requested_goal_control()
+                if detached_goal_control is not None:
                     try:
-                        self._persist_goal_control_for_resume(goal_control)
+                        self._persist_goal_control_for_resume(detached_goal_control)
                     except Exception:
                         log.warning(
                             "Could not save pending goal control before forced exit; "
@@ -451,6 +457,15 @@ class InteractiveShellController:
                 record_inflight_shell_exit(self.session, self._inflight_exit_command)
                 self._inflight_exit_command = None
             finish_shell_exit(self.session, self.service_console)
+        if self.state.has_detached_turn_worker() and not self._deferred_session_close_registered:
+            self._deferred_session_close_registered = True
+            self.turn_runtime.run_after_turn_worker(
+                functools.partial(
+                    close_repl_session_after_detached_worker,
+                    self.session,
+                    detached_goal_control,
+                )
+            )
 
 
 __all__ = ["InteractiveShellController"]

@@ -523,7 +523,7 @@ class JsonlSessionStore:
         records = self._read_records(path)
         if not records:
             return
-        trailing_leaf = records[-1].get("type") == "leaf"
+        trailing_leaf = self._conversation_tip_is_closed(records)
         if not trailing_leaf and not self._has_turns(records):
             from core.agent_harness.session.pending_choice import PendingUserChoice
 
@@ -822,6 +822,15 @@ class JsonlSessionStore:
             or (rec.get("type") == "custom_message" and rec.get("custom_type") == "turn_stub")
             for rec in records
         )
+
+    @staticmethod
+    def _conversation_tip_is_closed(records: list[dict[str, Any]]) -> bool:
+        """Return whether the newest non-sidecar record is a closing leaf."""
+        for record in reversed(records):
+            if record.get("sidecar") or record.get("type") == "trace_span":
+                continue
+            return record.get("type") == "leaf"
+        return False
 
     @staticmethod
     def _count_turns(records: list[dict[str, Any]]) -> int:

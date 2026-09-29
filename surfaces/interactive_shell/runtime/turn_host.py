@@ -80,6 +80,7 @@ class _DaemonTurnSlot:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._available = True
+        self._release_callbacks: list[Callable[[], None]] = []
 
     async def claim(self) -> None:
         """Wait interruptibly until no earlier worker remains alive."""
@@ -94,6 +95,30 @@ class _DaemonTurnSlot:
         """Allow the next queued turn to create its worker."""
         with self._lock:
             self._available = True
+            callbacks = tuple(self._release_callbacks)
+            self._release_callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                _logger.warning("Deferred turn cleanup failed", exc_info=True)
+
+    def run_when_available(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` now or after the current blocking worker exits."""
+        callback_context = contextvars.copy_context()
+
+        def _run_in_registration_context() -> None:
+            callback_context.run(callback)
+
+        with self._lock:
+            run_now = self._available
+            if not run_now:
+                self._release_callbacks.append(_run_in_registration_context)
+        if run_now:
+            try:
+                _run_in_registration_context()
+            except Exception:
+                _logger.warning("Immediate turn cleanup failed", exc_info=True)
 
 
 def _complete_daemon_turn(
@@ -169,6 +194,10 @@ class AgentTurnResources:
         repr=False,
         compare=False,
     )
+
+    def run_after_turn_worker(self, callback: Callable[[], None]) -> None:
+        """Run cleanup once the blocking worker no longer owns turn state."""
+        self._turn_slot.run_when_available(callback)
 
 
 def _confirm_via_prompt(runtime: AgentTurnResources, prompt: str) -> str:

@@ -158,6 +158,23 @@ def test_goal_control_sidecar_is_durable_and_acknowledged(storage_home: Path) ->
     assert reloaded[RestoreContextKey.SESSION_GOAL_CONTROLS] == []
 
 
+def test_goal_control_sidecar_does_not_reopen_a_closed_tip(storage_home: Path) -> None:
+    storage = JsonlSessionStore()
+    session = _session()
+    storage.open_session(session)
+    storage.append_turn(session, "chat", "start")
+    storage.flush(session)
+    storage.append_session_goal_control(session.session_id, "goal_clear")
+
+    storage.flush(session)
+
+    records = [
+        json.loads(line)
+        for line in session_path(session.session_id).read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(record.get("type") == "leaf" for record in records) == 1
+
+
 def test_goal_control_write_failure_is_not_suppressed(storage_home: Path) -> None:
     with pytest.raises(OSError, match="Could not persist session-goal control"):
         JsonlSessionStore().append_session_goal_control("missing-session", "goal_clear")
