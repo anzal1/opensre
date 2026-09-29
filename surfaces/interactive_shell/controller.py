@@ -15,6 +15,7 @@ from rich.console import Console
 from config.repl_config import ReplConfig
 from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.session_goal import (
+    SessionGoal,
     apply_session_goal_control,
     session_goal_is_active,
 )
@@ -407,6 +408,9 @@ class InteractiveShellController:
             self._ci_fix_status_cleanup = None
         graceful_turn = self.state.current_task if self._finish_exit_on_shutdown else None
         detached_goal_control: HostCancelReason | None = None
+        detached_goal_control_saved = False
+        detached_target_goal: SessionGoal | None = None
+        detached_exit_command: str | None = None
         self.state.request_exit()
         if graceful_turn is not None:
             self.state.signal_current_dispatch()
@@ -424,9 +428,11 @@ class InteractiveShellController:
                 log.warning("In-flight exit turn did not drain before shutdown")
                 self.state.mark_turn_worker_detached()
                 detached_goal_control = self.state.requested_goal_control()
+                detached_target_goal = self.session.session_goal
                 if detached_goal_control is not None:
                     try:
                         self._persist_goal_control_for_resume(detached_goal_control)
+                        detached_goal_control_saved = True
                     except Exception:
                         log.warning(
                             "Could not save pending goal control before forced exit; "
@@ -454,7 +460,10 @@ class InteractiveShellController:
         if self._finish_exit_on_shutdown:
             self._finish_exit_on_shutdown = False
             if self._inflight_exit_command is not None:
-                record_inflight_shell_exit(self.session, self._inflight_exit_command)
+                if self.state.has_detached_turn_worker():
+                    detached_exit_command = self._inflight_exit_command
+                else:
+                    record_inflight_shell_exit(self.session, self._inflight_exit_command)
                 self._inflight_exit_command = None
             finish_shell_exit(self.session, self.service_console)
         if self.state.has_detached_turn_worker() and not self._deferred_session_close_registered:
@@ -463,7 +472,9 @@ class InteractiveShellController:
                 functools.partial(
                     close_repl_session_after_detached_worker,
                     self.session,
-                    detached_goal_control,
+                    None if detached_goal_control_saved else detached_goal_control,
+                    detached_target_goal,
+                    detached_exit_command,
                 )
             )
 

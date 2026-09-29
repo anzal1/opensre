@@ -275,6 +275,12 @@ class InMemorySessionStore:
             SESSION_GOAL_CONTROL_REQUESTED,
         )
 
+        records = self._files.get(session_id)
+        if records is None:
+            raise OSError("Could not persist session-goal control")
+        target_entry_id = self._current_leaf(records)
+        if target_entry_id is None:
+            raise OSError("Could not identify session-goal control branch")
         control_id = uuid.uuid4().hex
         entry_id = self._append(
             session_id,
@@ -283,6 +289,7 @@ class InMemorySessionStore:
                 "control_id": control_id,
                 "reason": reason,
                 "status": SESSION_GOAL_CONTROL_REQUESTED,
+                "target_entry_id": target_entry_id,
             },
             sidecar=True,
         )

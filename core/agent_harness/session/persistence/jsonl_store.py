@@ -427,18 +427,26 @@ class JsonlSessionStore:
             SESSION_GOAL_CONTROL_REQUESTED,
         )
 
+        path = session_path(session_id)
+        if not path.exists():
+            raise OSError("Could not persist session-goal control")
         control_id = _new_id()
-        entry_id = self._append_entry(
-            session_id,
-            SESSION_GOAL_CONTROL_RECORD_TYPE,
-            {
-                "control_id": control_id,
-                "reason": reason,
-                "status": SESSION_GOAL_CONTROL_REQUESTED,
-            },
-            durable=True,
-            sidecar=True,
-        )
+        with self._locked(path):
+            target_entry_id, _needs_separator = self._current_leaf_id(session_id, path)
+            if target_entry_id is None:
+                raise OSError("Could not identify session-goal control branch")
+            entry_id = self._append_entry(
+                session_id,
+                SESSION_GOAL_CONTROL_RECORD_TYPE,
+                {
+                    "control_id": control_id,
+                    "reason": reason,
+                    "status": SESSION_GOAL_CONTROL_REQUESTED,
+                    "target_entry_id": target_entry_id,
+                },
+                durable=True,
+                sidecar=True,
+            )
         if not entry_id:
             raise OSError("Could not persist session-goal control")
         return control_id

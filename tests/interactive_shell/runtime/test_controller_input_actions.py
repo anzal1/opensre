@@ -340,7 +340,7 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     worker_finished = threading.Event()
     exit_finished: list[bool] = []
     deferred_closes: list[object] = []
-    released_resources: list[bool] = []
+    deferred_finalizations: list[tuple[object, object, object, object]] = []
     monkeypatch.setattr(
         "surfaces.interactive_shell.controller._INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS",
         0.01,
@@ -354,18 +354,23 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     def _capture_deferred_close(_runtime: object, callback: object) -> None:
         deferred_closes.append(callback)
 
+    def _finalize_after_detach(
+        session: object,
+        fallback_goal_control: object,
+        target_goal: object,
+        exit_command: object,
+    ) -> None:
+        deferred_finalizations.append((session, fallback_goal_control, target_goal, exit_command))
+
     monkeypatch.setattr(
         type(controller.turn_runtime),
         "run_after_turn_worker",
         _capture_deferred_close,
     )
-    original_release_resources = controller.session.release_resources
-
-    def _release_resources() -> None:
-        original_release_resources()
-        released_resources.append(True)
-
-    monkeypatch.setattr(controller.session, "release_resources", _release_resources)
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.controller.close_repl_session_after_detached_worker",
+        _finalize_after_detach,
+    )
     store = InMemorySessionStore()
     controller.session.store = store
     store.open_session(controller.session)
@@ -401,7 +406,7 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         assert controller.state.has_detached_turn_worker()
         assert exit_finished == [True]
         assert len(deferred_closes) == 1
-        assert released_resources == []
+        assert deferred_finalizations == []
         stored_records = store.read(controller.session.session_id)
         goal_records = [
             record
@@ -439,8 +444,12 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         deferred_close = deferred_closes.pop()
         assert callable(deferred_close)
         deferred_close()
-        assert controller.session.session_goal is None
-        assert released_resources == [True]
+        assert len(deferred_finalizations) == 1
+        finalized_session, fallback_control, target_goal, exit_command = deferred_finalizations[0]
+        assert finalized_session is controller.session
+        assert fallback_control is None
+        assert isinstance(target_goal, SessionGoal)
+        assert exit_command == "/exit"
     finally:
         release_turn.set()
         task.cancel()
@@ -945,6 +954,137 @@ def test_shutdown_does_not_wait_for_a_detached_turn_worker(
     monkeypatch.setattr(session_shutdown, "session_execution_lock", _unexpected_lock)
 
     session_shutdown.close_repl_session(Session(), state)
+
+
+def test_deferred_shutdown_does_not_apply_a_stale_control_to_a_replacement_goal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import nullcontext
+
+    import surfaces.interactive_shell.runtime.session_shutdown as session_shutdown
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.spi.cancel import HostCancelReason
+    from surfaces.interactive_shell.session import Session
+
+    target = SessionGoal(condition="old goal", started_at=1.0)
+    replacement = SessionGoal(condition="replacement goal", started_at=2.0)
+    session = Session()
+    attach_session_goal(session, target)
+    events: list[str] = []
+
+    class _Manager:
+        def refresh_from_storage(self, refreshed: Session) -> None:
+            events.append("refresh")
+            attach_session_goal(refreshed, replacement)
+
+        def close(self, _session: Session) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(
+        session_shutdown.SessionManager,
+        "for_session",
+        lambda _session: _Manager(),
+    )
+    monkeypatch.setattr(
+        session_shutdown,
+        "session_execution_lock",
+        lambda _session_id: nullcontext(),
+    )
+
+    session_shutdown.close_repl_session_after_detached_worker(
+        session,
+        HostCancelReason.GOAL_CLEAR,
+        target,
+        None,
+    )
+
+    assert session.session_goal is replacement
+    assert events == ["refresh", "close"]
+
+
+def test_deferred_shutdown_applies_fallback_control_to_the_same_goal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import nullcontext
+
+    import surfaces.interactive_shell.runtime.session_shutdown as session_shutdown
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.spi.cancel import HostCancelReason
+    from surfaces.interactive_shell.session import Session
+
+    target = SessionGoal(condition="old goal", started_at=1.0)
+    session = Session()
+    attach_session_goal(session, target)
+    events: list[str] = []
+
+    class _Manager:
+        def refresh_from_storage(self, _session: Session) -> None:
+            events.append("refresh")
+
+        def close(self, closing: Session) -> None:
+            assert closing.session_goal is None
+            events.append("close")
+
+    monkeypatch.setattr(
+        session_shutdown.SessionManager,
+        "for_session",
+        lambda _session: _Manager(),
+    )
+    monkeypatch.setattr(
+        session_shutdown,
+        "session_execution_lock",
+        lambda _session_id: nullcontext(),
+    )
+
+    session_shutdown.close_repl_session_after_detached_worker(
+        session,
+        HostCancelReason.GOAL_CLEAR,
+        target,
+        None,
+    )
+
+    assert events == ["refresh", "close"]
+
+
+def test_deferred_shutdown_records_exit_after_refresh_and_before_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import nullcontext
+
+    import surfaces.interactive_shell.runtime.session_shutdown as session_shutdown
+    from surfaces.interactive_shell.session import Session
+
+    session = Session()
+    events: list[str] = []
+
+    class _Manager:
+        def refresh_from_storage(self, _session: Session) -> None:
+            events.append("refresh")
+
+        def close(self, closing: Session) -> None:
+            assert closing.history[-1]["type"] == "slash"
+            assert closing.history[-1]["text"] == "/exit"
+            events.append("close")
+
+    monkeypatch.setattr(
+        session_shutdown.SessionManager,
+        "for_session",
+        lambda _session: _Manager(),
+    )
+    monkeypatch.setattr(
+        session_shutdown,
+        "session_execution_lock",
+        lambda _session_id: nullcontext(),
+    )
+
+    session_shutdown.close_repl_session_after_detached_worker(
+        session,
+        None,
+        None,
+        "/exit",
+    )
+
+    assert events == ["refresh", "close"]
 
 
 @pytest.mark.asyncio

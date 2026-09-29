@@ -158,14 +158,11 @@ def _pause(session: Session, console: Console) -> bool:
         session,
         HostCancelReason.GOAL_PAUSE,
     )
+    if follows_inflight_pause:
+        return True
     goal = getattr(session, "session_goal", None)
     if not isinstance(goal, SessionGoal) or not session_goal_is_active(session):
         if isinstance(goal, SessionGoal) and session_goal_is_paused(session):
-            terminal = session_terminal(session)
-            if follows_inflight_pause:
-                if terminal is None or terminal.goal_paint_signature != goal_paint_signature(goal):
-                    _print_goal_block(session, console, goal)
-                return True
             print_repl_text(
                 console, format_session_goal_progress(goal, session=session), markup=False
             )

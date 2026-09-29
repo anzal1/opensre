@@ -144,6 +144,17 @@ def test_goal_control_sidecar_is_durable_and_acknowledged(storage_home: Path) ->
     session = _session()
     storage.open_session(session)
     storage.append_turn(session, "chat", "start")
+    records = [
+        json.loads(line)
+        for line in session_path(session.session_id).read_text(encoding="utf-8").splitlines()
+    ]
+    historical_entry_id = str(records[-1]["id"])
+    storage.append_turn(session, "chat", "continue")
+    records = [
+        json.loads(line)
+        for line in session_path(session.session_id).read_text(encoding="utf-8").splitlines()
+    ]
+    control_target_entry_id = str(records[-1]["id"])
 
     control_id = storage.append_session_goal_control(session.session_id, "goal_clear")
 
@@ -152,6 +163,23 @@ def test_goal_control_sidecar_is_durable_and_acknowledged(storage_home: Path) ->
     assert loaded[RestoreContextKey.SESSION_GOAL_CONTROLS] == [
         {"control_id": control_id, "reason": "goal_clear"}
     ]
+    historical = JsonlSessionRepo().load_session(f"{session.session_id}:{historical_entry_id[:8]}")
+    assert historical is not None
+    assert historical[RestoreContextKey.SESSION_GOAL_CONTROLS] == []
+    target_snapshot = JsonlSessionRepo().load_session(
+        f"{session.session_id}:{control_target_entry_id[:8]}"
+    )
+    assert target_snapshot is not None
+    assert target_snapshot[RestoreContextKey.SESSION_GOAL_CONTROLS] == []
+    storage.append_message(
+        session.session_id,
+        role="user",
+        content="alternate branch",
+        parent_id=historical_entry_id,
+    )
+    alternate = JsonlSessionRepo().load_session(session.session_id)
+    assert alternate is not None
+    assert alternate[RestoreContextKey.SESSION_GOAL_CONTROLS] == []
     storage.complete_session_goal_control(session.session_id, control_id)
     reloaded = JsonlSessionRepo().load_session(session.session_id)
     assert reloaded is not None

@@ -202,6 +202,30 @@ def test_inflight_goal_clear_acknowledges_without_clearing_a_new_goal() -> None:
     assert session.session_goal is replacement
 
 
+def test_inflight_goal_pause_acknowledges_without_pausing_a_new_goal() -> None:
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.spi.cancel import HostCancelReason
+    from core.agent_harness.spi.session_goal import apply_session_goal_control
+    from surfaces.interactive_shell.runtime.goal_controls import (
+        mark_inflight_goal_control,
+    )
+
+    session = Session()
+    console, _buf = _console()
+    assert _cmd_goal(session, console, ["set", "ship the fix"])
+    mark_inflight_goal_control(session, HostCancelReason.GOAL_PAUSE)
+    assert apply_session_goal_control(session, HostCancelReason.GOAL_PAUSE)
+    replacement = attach_session_goal(
+        session,
+        SessionGoal(condition="review the result", max_outer_turns=2),
+    )
+
+    assert _cmd_goal(session, console, ["pause"])
+
+    assert session.session_goal is replacement
+    assert session_goal_is_active(session)
+
+
 def test_repeated_idle_goal_pause_still_reports_the_current_state() -> None:
     session = Session()
     console, buf = _console()

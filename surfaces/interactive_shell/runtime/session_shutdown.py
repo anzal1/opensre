@@ -6,9 +6,10 @@ import logging
 
 from core.agent_harness import SessionManager
 from core.agent_harness.spi.cancel import HostCancelReason
-from core.agent_harness.spi.session_goal import apply_session_goal_control
+from core.agent_harness.spi.session_goal import SessionGoal, apply_session_goal_control
 from infrastructure.turn_host.session_lock import session_execution_lock
 from surfaces.interactive_shell.runtime.core.state import ReplState
+from surfaces.interactive_shell.runtime.exit_control import record_inflight_shell_exit
 from surfaces.interactive_shell.session import Session
 
 logger = logging.getLogger(__name__)
@@ -32,15 +33,26 @@ def close_repl_session(session: Session, state: ReplState) -> None:
 
 def close_repl_session_after_detached_worker(
     session: Session,
-    goal_control: HostCancelReason | None,
+    fallback_goal_control: HostCancelReason | None,
+    target_goal: SessionGoal | None,
+    exit_command: str | None,
 ) -> None:
     """Finalize a session after its detached turn worker releases ownership."""
     manager = SessionManager.for_session(session)
     try:
         with session_execution_lock(session.session_id):
             manager.refresh_from_storage(session)
-            if goal_control is not None:
-                apply_session_goal_control(session, goal_control)
+            current_goal = session.session_goal
+            if (
+                fallback_goal_control is not None
+                and isinstance(current_goal, SessionGoal)
+                and isinstance(target_goal, SessionGoal)
+                and current_goal.condition == target_goal.condition
+                and current_goal.started_at == target_goal.started_at
+            ):
+                apply_session_goal_control(session, fallback_goal_control)
+            if exit_command is not None:
+                record_inflight_shell_exit(session, exit_command)
             manager.close(session)
     except Exception:
         logger.warning("Deferred session close failed", exc_info=True)

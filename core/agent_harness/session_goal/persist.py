@@ -204,9 +204,11 @@ def should_persist_session_goal_state(
 
 def pending_session_goal_controls(
     records: Sequence[Mapping[str, Any]],
+    *,
+    branch_entry_ids: set[str] | None = None,
 ) -> list[dict[str, str]]:
     """Return durable goal controls that have no matching applied record."""
-    pending: dict[str, dict[str, str]] = {}
+    pending: dict[str, tuple[str, str]] = {}
     for record in records:
         if record.get("type") != SESSION_GOAL_CONTROL_RECORD_TYPE:
             continue
@@ -218,9 +220,18 @@ def pending_session_goal_controls(
             pending.pop(control_id, None)
             continue
         reason = record.get("reason")
-        if status == SESSION_GOAL_CONTROL_REQUESTED and isinstance(reason, str):
-            pending[control_id] = {"control_id": control_id, "reason": reason}
-    return list(pending.values())
+        target_entry_id = record.get("target_entry_id")
+        if (
+            status == SESSION_GOAL_CONTROL_REQUESTED
+            and isinstance(reason, str)
+            and isinstance(target_entry_id, str)
+        ):
+            pending[control_id] = (reason, target_entry_id)
+    return [
+        {"control_id": control_id, "reason": reason}
+        for control_id, (reason, target_entry_id) in pending.items()
+        if branch_entry_ids is None or target_entry_id in branch_entry_ids
+    ]
 
 
 def apply_session_goal_state(session: Any, payload: Any) -> None:
