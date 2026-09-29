@@ -318,6 +318,55 @@ async def test_exit_control_stops_the_running_dispatch_without_queueing(
         _ = await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_exit_control_bounds_a_worker_that_ignores_cooperative_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+
+    from core.agent_harness.spi.cancel import HostCancelEvent
+
+    worker_started = threading.Event()
+    release_turn = threading.Event()
+    exit_finished: list[bool] = []
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.controller._INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.controller.finish_shell_exit",
+        lambda _session, _console: exit_finished.append(True),
+    )
+    controller = _controller()
+    cancel = HostCancelEvent()
+
+    def _hold() -> None:
+        worker_started.set()
+        release_turn.wait()
+
+    task = asyncio.create_task(asyncio.to_thread(_hold))
+    controller.state.start_dispatch(task=task, cancel_event=cancel)
+    try:
+        assert await asyncio.to_thread(worker_started.wait, 1)
+        kept = await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.EXIT_SHELL,
+                submitted_text="/exit",
+            )
+        )
+
+        assert kept is False
+        await asyncio.wait_for(controller._shutdown_runtime(), timeout=0.5)
+
+        assert task.cancelled()
+        assert exit_finished == [True]
+    finally:
+        release_turn.set()
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.parametrize("reason_name", ["GOAL_PAUSE", "GOAL_CLEAR"])
 def test_requesting_goal_control_soft_cancels_the_running_turn(reason_name: str) -> None:
     import asyncio

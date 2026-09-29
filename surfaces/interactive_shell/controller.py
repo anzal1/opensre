@@ -69,6 +69,7 @@ from surfaces.interactive_shell.ui.input_prompt.stdout import patch_prompt_stdou
 log = logging.getLogger(__name__)
 
 _GOAL_CONTROL_LOCK_RETRY_SECONDS = 0.1
+_INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 @contextmanager
@@ -398,7 +399,14 @@ class InteractiveShellController:
 
         if graceful_turn is not None and not graceful_turn.done():
             try:
-                await asyncio.shield(graceful_turn)
+                await asyncio.wait_for(
+                    asyncio.shield(graceful_turn),
+                    timeout=_INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                log.warning("In-flight exit turn did not drain before shutdown")
+                self.state.cancel_current_dispatch()
+                await asyncio.gather(graceful_turn, return_exceptions=True)
             except asyncio.CancelledError:
                 log.debug("In-flight exit turn was cancelled before it drained")
             except Exception as exc:
