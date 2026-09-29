@@ -319,13 +319,16 @@ async def test_exit_control_stops_the_running_dispatch_without_queueing(
 
 
 @pytest.mark.asyncio
-async def test_exit_control_bounds_a_worker_that_ignores_cooperative_cancel(
+async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
     import threading
 
-    from core.agent_harness.spi.cancel import HostCancelEvent
+    from core.agent_harness.session import InMemorySessionStore, SessionManager
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
 
     worker_started = threading.Event()
     release_turn = threading.Event()
@@ -339,7 +342,17 @@ async def test_exit_control_bounds_a_worker_that_ignores_cooperative_cancel(
         lambda _session, _console: exit_finished.append(True),
     )
     controller = _controller()
+    store = InMemorySessionStore()
+    controller.session.store = store
+    store.open_session(controller.session)
+    store.append_turn(controller.session, "chat", "seed")
+    attach_session_goal(
+        controller.session,
+        SessionGoal(condition="keep going", max_outer_turns=4),
+    )
+    SessionManager.for_session(controller.session).flush(controller.session)
     cancel = HostCancelEvent()
+    cancel.request(HostCancelReason.GOAL_CLEAR)
 
     def _hold() -> None:
         worker_started.set()
@@ -362,6 +375,15 @@ async def test_exit_control_bounds_a_worker_that_ignores_cooperative_cancel(
         assert task.cancelled()
         assert controller.state.has_detached_turn_worker()
         assert exit_finished == [True]
+        stored_records = store.read(controller.session.session_id)
+        records = [
+            record
+            for record in stored_records
+            if record.get("type") == "custom_message"
+            and record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
+        ]
+        assert records[-1].get("content", {}).get("session_goal") is None
+        assert sum(record.get("type") == "leaf" for record in stored_records) == 1
     finally:
         release_turn.set()
         task.cancel()

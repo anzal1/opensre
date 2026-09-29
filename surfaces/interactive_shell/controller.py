@@ -306,6 +306,19 @@ class InteractiveShellController:
         ):
             await asyncio.sleep(_GOAL_CONTROL_LOCK_RETRY_SECONDS)
 
+    def _persist_goal_control_after_worker_detach(self, reason: HostCancelReason) -> None:
+        """Persist explicit goal intent after the worker missed its exit deadline.
+
+        Forced exit transfers this narrow state mutation to the shutdown owner.
+        The detached worker shares the same session object and cancel reason, so
+        it observes the controlled goal if it later unwinds instead of restoring
+        pre-control state.
+        """
+        from core.agent_harness import SessionManager
+
+        apply_goal_control(self.session, reason)
+        SessionManager.for_session(self.session).flush_session_goal_state(self.session)
+
     async def _handle_input_action(self, action: InputAction) -> bool:
         match action:
             case IgnoreInput():
@@ -406,6 +419,15 @@ class InteractiveShellController:
             except TimeoutError:
                 log.warning("In-flight exit turn did not drain before shutdown")
                 self.state.mark_turn_worker_detached()
+                goal_control = self.state.requested_goal_control()
+                if goal_control is not None:
+                    try:
+                        self._persist_goal_control_after_worker_detach(goal_control)
+                    except Exception:
+                        log.warning(
+                            "Could not persist goal control during forced exit",
+                            exc_info=True,
+                        )
                 self.state.cancel_current_dispatch()
                 await asyncio.gather(graceful_turn, return_exceptions=True)
             except asyncio.CancelledError:

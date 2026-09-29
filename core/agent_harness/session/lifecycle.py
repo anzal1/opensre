@@ -372,6 +372,13 @@ class SessionManager:
         """
         self._flush(session)
 
+    def flush_session_goal_state(self, session: SessionCore) -> None:
+        """Best-effort persist resumable goal state without finalizing the turn."""
+        try:
+            session.store.flush_session_goal_state(session)
+        except OSError:
+            logger.debug("[session] goal-state flush failed", exc_info=True)
+
     @staticmethod
     def _flush(session: SessionCore) -> None:
         """Best-effort persist through the session's own backend.

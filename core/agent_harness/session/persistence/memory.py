@@ -214,25 +214,8 @@ class InMemorySessionStore:
                 },
             )
             records = self._files.get(session.session_id, records)
-        if hasattr(session, "session_goal"):
-            from core.agent_harness.session_goal.persist import (
-                SESSION_GOAL_STATE_CUSTOM_TYPE,
-                session_goal_state_snapshot,
-                should_persist_session_goal_state,
-            )
-
-            goal_state = session_goal_state_snapshot(session)
-            if should_persist_session_goal_state(goal_state, prior_records=records):
-                self._append(
-                    session.session_id,
-                    "custom_message",
-                    {
-                        "custom_type": SESSION_GOAL_STATE_CUSTOM_TYPE,
-                        "content": goal_state,
-                        "display": False,
-                    },
-                )
-                records = self._files.get(session.session_id, records)
+        self._append_session_goal_state(session, records)
+        records = self._files.get(session.session_id, records)
         if hasattr(session, "task_plan"):
             from core.agent_harness.task_plan.persist import (
                 TASK_PLAN_STATE_CUSTOM_TYPE,
@@ -292,6 +275,37 @@ class InMemorySessionStore:
                 )
             },
         )
+
+    def flush_session_goal_state(self, session: SessionPersistenceSource) -> None:
+        """Persist only goal/CTA state while a detached turn still owns its lease."""
+        records = self._files.get(session.session_id)
+        if records:
+            self._append_session_goal_state(session, records)
+
+    def _append_session_goal_state(
+        self,
+        session: SessionPersistenceSource,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if not hasattr(session, "session_goal"):
+            return
+        from core.agent_harness.session_goal.persist import (
+            SESSION_GOAL_STATE_CUSTOM_TYPE,
+            session_goal_state_snapshot,
+            should_persist_session_goal_state,
+        )
+
+        goal_state = session_goal_state_snapshot(session)
+        if should_persist_session_goal_state(goal_state, prior_records=records):
+            self._append(
+                session.session_id,
+                "custom_message",
+                {
+                    "custom_type": SESSION_GOAL_STATE_CUSTOM_TYPE,
+                    "content": goal_state,
+                    "display": False,
+                },
+            )
 
     def reopen_session(self, _session_id: str) -> None:
         return

@@ -110,6 +110,33 @@ def test_flush_still_persists_context_and_messages(storage_home: Path) -> None:
     assert any(rec.get("type") == "message" and rec["role"] == "user" for rec in records)
 
 
+def test_goal_state_flush_does_not_finalize_the_active_turn(storage_home: Path) -> None:
+    from core.agent_harness.session_goal.goal import SessionGoal
+    from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
+
+    storage = JsonlSessionStore()
+    session = _session()
+    session.session_goal = SessionGoal(condition="finish safely", max_outer_turns=3)
+    session.offered_upgrade_ctas = set()
+    session.pending_integration_setup_offer = None
+    storage.open_session(session)
+    storage.append_turn(session, "chat", "start")
+
+    storage.flush_session_goal_state(session)
+    session.session_goal = None
+    storage.flush_session_goal_state(session)
+
+    records = [
+        json.loads(line)
+        for line in session_path(session.session_id).read_text(encoding="utf-8").splitlines()
+    ]
+    goal_states = [
+        record for record in records if record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
+    ]
+    assert goal_states[-1]["content"]["session_goal"] is None
+    assert not any(record.get("type") == "leaf" for record in records)
+
+
 def test_flush_parses_the_session_file_once(
     storage_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

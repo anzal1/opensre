@@ -126,6 +126,9 @@ class SessionStore(Protocol):
     def flush(self, session: SessionPersistenceSource) -> None:
         raise NotImplementedError
 
+    def flush_session_goal_state(self, session: SessionPersistenceSource) -> None:
+        """Persist only resumable session-goal state without finalizing a live turn."""
+
     def reopen_session(self, session_id: str) -> None:
         raise NotImplementedError
 

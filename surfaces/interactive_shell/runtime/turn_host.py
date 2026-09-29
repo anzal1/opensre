@@ -75,7 +75,7 @@ _logger = logging.getLogger(__name__)
 
 def _complete_daemon_turn(
     future: asyncio.Future[None],
-    error: BaseException | None,
+    error: Exception | None,
 ) -> None:
     """Complete ``future`` unless its awaiting task was already cancelled."""
     if future.done():
@@ -93,17 +93,20 @@ async def _run_daemon_turn(work: Callable[[], object]) -> None:
     context = contextvars.copy_context()
 
     def _worker() -> None:
-        error: BaseException | None = None
+        completed = False
+        error: Exception | None = None
         try:
             context.run(work)
-        except BaseException as exc:
+            completed = True
+        except Exception as exc:
             error = exc
-        try:
-            loop.call_soon_threadsafe(_complete_daemon_turn, future, error)
-        except RuntimeError:
+        finally:
+            if not completed and error is None:
+                error = RuntimeError("Interactive turn worker stopped unexpectedly")
             # A forced shell exit may close the event loop while detached work
             # is still unwinding. There is no waiter left to notify in that case.
-            return
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(_complete_daemon_turn, future, error)
 
     threading.Thread(
         target=_worker,

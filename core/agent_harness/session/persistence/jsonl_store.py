@@ -408,6 +408,37 @@ class JsonlSessionStore:
             with self._locked(path):
                 self._flush_locked(session, path)
 
+    def flush_session_goal_state(self, session: SessionPersistenceSource) -> None:
+        """Persist only goal/CTA state while a detached turn still owns its lease."""
+        with contextlib.suppress(Exception):
+            path = session_path(session.session_id)
+            if not path.exists():
+                return
+            with self._locked(path):
+                self._append_session_goal_state(session, self._read_records(path))
+
+    def _append_session_goal_state(
+        self,
+        session: SessionPersistenceSource,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if not records or not hasattr(session, "session_goal"):
+            return
+        from core.agent_harness.session_goal.persist import (
+            SESSION_GOAL_STATE_CUSTOM_TYPE,
+            session_goal_state_snapshot,
+            should_persist_session_goal_state,
+        )
+
+        goal_state = session_goal_state_snapshot(session)
+        if should_persist_session_goal_state(goal_state, prior_records=records):
+            self.append_custom_message(
+                session.session_id,
+                custom_type=SESSION_GOAL_STATE_CUSTOM_TYPE,
+                content=goal_state,
+                display=False,
+            )
+
     def _flush_locked(self, session: SessionPersistenceSource, path: Path) -> None:
         """Read-modify-append leaf / goal / message records; runs under the write lock.
 
@@ -440,21 +471,7 @@ class JsonlSessionStore:
                 content=dict(session.accumulated_context),
                 display=False,
             )
-        if hasattr(session, "session_goal"):
-            from core.agent_harness.session_goal.persist import (
-                SESSION_GOAL_STATE_CUSTOM_TYPE,
-                session_goal_state_snapshot,
-                should_persist_session_goal_state,
-            )
-
-            goal_state = session_goal_state_snapshot(session)
-            if should_persist_session_goal_state(goal_state, prior_records=records):
-                self.append_custom_message(
-                    session.session_id,
-                    custom_type=SESSION_GOAL_STATE_CUSTOM_TYPE,
-                    content=goal_state,
-                    display=False,
-                )
+        self._append_session_goal_state(session, records)
         if hasattr(session, "task_plan"):
             from core.agent_harness.task_plan.persist import (
                 TASK_PLAN_STATE_CUSTOM_TYPE,
