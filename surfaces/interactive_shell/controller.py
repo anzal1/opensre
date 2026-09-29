@@ -37,12 +37,12 @@ from surfaces.interactive_shell.runtime.input import (
     PromptInputReader,
 )
 from surfaces.interactive_shell.runtime.input.actions import (
-    CancelTurn,
     CloseShell,
     DeliverConfirmation,
     IgnoreInput,
+    InflightControl,
     InputAction,
-    PauseGoal,
+    RunInflightControl,
     SubmitTurn,
 )
 from surfaces.interactive_shell.runtime.loop_scheduler import (
@@ -293,12 +293,18 @@ class InteractiveShellController:
                 return True
             case CloseShell():
                 return False
-            case CancelTurn(submitted_text=text):
+            case RunInflightControl(
+                control=InflightControl.CANCEL_TURN,
+                submitted_text=text,
+            ):
                 if text:
                     self.prompt.render_submitted_prompt(self.echo_console, text)
                 self.state.cancel_current_dispatch()
                 return True
-            case PauseGoal(submitted_text=text):
+            case RunInflightControl(
+                control=InflightControl.PAUSE_GOAL,
+                submitted_text=text,
+            ):
                 # Keep slash execution serialized through the normal turn
                 # queue, but signal current work now. The queue owner applies
                 # the state transition after the worker thread returns, before

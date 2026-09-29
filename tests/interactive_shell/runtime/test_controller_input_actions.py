@@ -12,11 +12,11 @@ from surfaces.interactive_shell.runtime.input import (
 )
 from surfaces.interactive_shell.runtime.input.actions import (
     QUEUE_DURING_CONFIRMATION_WARNING,
-    CancelTurn,
     CloseShell,
     DeliverConfirmation,
     IgnoreInput,
-    PauseGoal,
+    InflightControl,
+    RunInflightControl,
     ShellInputSnapshot,
     SubmitTurn,
     decide_input_action,
@@ -47,7 +47,7 @@ def test_decide_closes_on_input_closed() -> None:
 
 
 def test_decide_cancels_on_input_cancelled() -> None:
-    assert _decide(InputCancelled()) == CancelTurn()
+    assert _decide(InputCancelled()) == RunInflightControl(control=InflightControl.CANCEL_TURN)
 
 
 @pytest.mark.parametrize("text", ["", "   "])
@@ -60,8 +60,9 @@ def test_decide_ignores_submitted_input_after_exit_requested() -> None:
 
 
 def test_decide_cancels_when_cancel_request_is_typed_during_dispatch() -> None:
-    assert _decide(InputSubmitted(" /cancel "), dispatch_running=True) == CancelTurn(
-        submitted_text="/cancel"
+    assert _decide(InputSubmitted(" /cancel "), dispatch_running=True) == RunInflightControl(
+        control=InflightControl.CANCEL_TURN,
+        submitted_text="/cancel",
     )
 
 
@@ -72,7 +73,10 @@ def test_decide_routes_goal_pause_as_an_inflight_control() -> None:
         needs_exclusive_stdin=True,
     )
 
-    assert action == PauseGoal(submitted_text="/goal pause")
+    assert action == RunInflightControl(
+        control=InflightControl.PAUSE_GOAL,
+        submitted_text="/goal pause",
+    )
 
 
 def test_decide_delivers_stripped_confirmation_answer() -> None:
@@ -210,7 +214,9 @@ async def test_cancelling_a_running_turn_keeps_its_skill_and_plan() -> None:
     task = asyncio.create_task(_hold())
     controller.state.start_dispatch(task=task, cancel_event=cancel_event)
     try:
-        kept = await controller._handle_input_action(CancelTurn())
+        kept = await controller._handle_input_action(
+            RunInflightControl(control=InflightControl.CANCEL_TURN)
+        )
 
         assert kept is True
         assert cancel_event.is_set()
@@ -314,7 +320,12 @@ def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns(
             await started.wait()
             await controller.state.queue.put("earlier queued turn")
 
-            kept = await controller._handle_input_action(PauseGoal(submitted_text="/goal pause"))
+            kept = await controller._handle_input_action(
+                RunInflightControl(
+                    control=InflightControl.PAUSE_GOAL,
+                    submitted_text="/goal pause",
+                )
+            )
 
             assert kept is True
             assert controller.session.terminal.pending_inflight_goal_pauses == 1
@@ -391,7 +402,12 @@ async def test_goal_pause_after_dispatch_finish_still_pauses_before_queued_work(
         assert controller.state.is_dispatch_running()
         assert controller.state.current_cancel_event is None
 
-        kept = await controller._handle_input_action(PauseGoal(submitted_text="/goal pause"))
+        kept = await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.PAUSE_GOAL,
+                submitted_text="/goal pause",
+            )
+        )
 
         assert kept is True
         assert controller.session.session_goal is not None
@@ -592,7 +608,12 @@ async def test_inflight_goal_pause_is_retained_until_the_turn_attaches_a_goal() 
     cancel = controller.state.current_cancel_event
     assert isinstance(cancel, HostCancelEvent)
     try:
-        kept = await controller._handle_input_action(PauseGoal(submitted_text="/goal pause"))
+        kept = await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.PAUSE_GOAL,
+                submitted_text="/goal pause",
+            )
+        )
 
         assert kept is True
         assert cancel.reason is HostCancelReason.GOAL_PAUSE

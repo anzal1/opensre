@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -22,9 +23,20 @@ QUEUE_DURING_CONFIRMATION_WARNING = (
 )
 
 
-def _is_goal_pause_control(text: str) -> bool:
-    """Return whether ``text`` is the exact literal ``/goal pause`` control."""
-    return text.lower().split() == ["/goal", "pause"]
+class InflightControl(enum.StrEnum):
+    """Exact literal controls that may act while a dispatch owns the worker."""
+
+    CANCEL_TURN = "cancel_turn"
+    PAUSE_GOAL = "pause_goal"
+
+
+def _inflight_control(text: str) -> InflightControl | None:
+    """Resolve an exact literal control without inferring natural-language intent."""
+    if looks_like_cancel_request(text):
+        return InflightControl.CANCEL_TURN
+    if text.lower().split() == ["/goal", "pause"]:
+        return InflightControl.PAUSE_GOAL
+    return None
 
 
 @dataclass(frozen=True)
@@ -45,13 +57,9 @@ class CloseShell:
 
 
 @dataclass(frozen=True)
-class CancelTurn:
-    submitted_text: str | None = None
-
-
-@dataclass(frozen=True)
-class PauseGoal:
-    submitted_text: str
+class RunInflightControl:
+    control: InflightControl
+    submitted_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,7 +74,7 @@ class SubmitTurn:
     warning: str | None = None
 
 
-InputAction = IgnoreInput | CloseShell | CancelTurn | PauseGoal | DeliverConfirmation | SubmitTurn
+InputAction = IgnoreInput | CloseShell | RunInflightControl | DeliverConfirmation | SubmitTurn
 
 
 def decide_input_action(
@@ -80,7 +88,7 @@ def decide_input_action(
         case InputClosed():
             return CloseShell()
         case InputCancelled():
-            return CancelTurn()
+            return RunInflightControl(control=InflightControl.CANCEL_TURN)
         case InputSubmitted(text):
             if snapshot.exit_requested or not text:
                 return IgnoreInput()
@@ -91,11 +99,10 @@ def decide_input_action(
             if not stripped:
                 return IgnoreInput()
 
-            if snapshot.dispatch_running and looks_like_cancel_request(stripped):
-                return CancelTurn(submitted_text=stripped)
-
-            if snapshot.dispatch_running and _is_goal_pause_control(stripped):
-                return PauseGoal(submitted_text=stripped)
+            if snapshot.dispatch_running:
+                control = _inflight_control(stripped)
+                if control is not None:
+                    return RunInflightControl(control=control, submitted_text=stripped)
 
             if snapshot.awaiting_confirmation:
                 if looks_like_confirmation_answer(stripped):
@@ -113,13 +120,13 @@ def decide_input_action(
 
 
 __all__ = [
-    "CancelTurn",
     "CloseShell",
     "DeliverConfirmation",
     "IgnoreInput",
+    "InflightControl",
     "InputAction",
-    "PauseGoal",
     "QUEUE_DURING_CONFIRMATION_WARNING",
+    "RunInflightControl",
     "ShellInputSnapshot",
     "SubmitTurn",
     "decide_input_action",
