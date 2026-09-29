@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.agent_harness.session import SessionCore
+from core.agent_harness import SessionCore
 from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.session_goal import (
     clear_session_goal,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from core.agent_harness.session import SessionCore
+from core.agent_harness import SessionCore
 from infrastructure.terminal.prompt_support import print_session_resume_hint
 from surfaces.interactive_shell.ui import DIM, HIGHLIGHT
 
