@@ -29,6 +29,7 @@ def _decide(
     exit_requested: bool = False,
     dispatch_running: bool = False,
     awaiting_confirmation: bool = False,
+    worker_running: bool = False,
     needs_exclusive_stdin: bool = False,
 ) -> object:
     return decide_input_action(
@@ -37,6 +38,7 @@ def _decide(
             exit_requested=exit_requested,
             dispatch_running=dispatch_running,
             awaiting_confirmation=awaiting_confirmation,
+            worker_running=worker_running,
         ),
         needs_exclusive_stdin=lambda _text: needs_exclusive_stdin,
     )
@@ -76,6 +78,13 @@ def test_decide_routes_goal_pause_as_an_inflight_control() -> None:
     assert action == RunInflightControl(
         control=InflightControl.PAUSE_GOAL,
         submitted_text="/goal pause",
+    )
+
+
+def test_decide_routes_exit_around_a_live_daemon_worker() -> None:
+    assert _decide(InputSubmitted("/exit"), worker_running=True) == RunInflightControl(
+        control=InflightControl.EXIT_SHELL,
+        submitted_text="/exit",
     )
 
 
@@ -312,6 +321,97 @@ async def test_exit_control_stops_the_running_dispatch_without_queueing(
         assert flushed_after_turn == [True]
         assert controller.session.history[-1]["type"] == "slash"
         assert controller.session.history[-1]["text"] == "/exit"
+    finally:
+        release_turn.set()
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_exit_control_defers_close_while_only_daemon_worker_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deferred_closes: list[object] = []
+    exit_finished: list[bool] = []
+    controller = _controller()
+
+    def _capture_deferred_close(_runtime: object, callback: object) -> None:
+        deferred_closes.append(callback)
+
+    monkeypatch.setattr(
+        type(controller.turn_runtime),
+        "has_live_turn_worker",
+        lambda _runtime: True,
+    )
+    monkeypatch.setattr(
+        type(controller.turn_runtime),
+        "run_after_turn_worker",
+        _capture_deferred_close,
+    )
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.controller.finish_shell_exit",
+        lambda _session, _console: exit_finished.append(True),
+    )
+
+    kept = await controller._handle_input_action(
+        RunInflightControl(
+            control=InflightControl.EXIT_SHELL,
+            submitted_text="/exit",
+        )
+    )
+    await controller._shutdown_runtime()
+
+    assert kept is False
+    assert controller.state.has_detached_turn_worker()
+    assert controller.session.history == []
+    assert exit_finished == [True]
+    assert len(deferred_closes) == 1
+
+
+@pytest.mark.asyncio
+async def test_closed_input_bounds_uncooperative_worker_and_defers_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+
+    from core.agent_harness.spi.cancel import HostCancelEvent
+
+    worker_started = threading.Event()
+    release_turn = threading.Event()
+    deferred_closes: list[object] = []
+    monkeypatch.setattr(
+        "surfaces.interactive_shell.controller._INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS",
+        0.01,
+    )
+    controller = _controller()
+
+    def _capture_deferred_close(_runtime: object, callback: object) -> None:
+        deferred_closes.append(callback)
+
+    monkeypatch.setattr(
+        type(controller.turn_runtime),
+        "run_after_turn_worker",
+        _capture_deferred_close,
+    )
+    cancel = HostCancelEvent()
+
+    def _hold() -> None:
+        worker_started.set()
+        release_turn.wait()
+
+    task = asyncio.create_task(asyncio.to_thread(_hold))
+    controller.state.start_dispatch(task=task, cancel_event=cancel)
+    try:
+        assert await asyncio.to_thread(worker_started.wait, 1)
+        assert await controller._handle_input_action(CloseShell()) is False
+
+        await asyncio.wait_for(controller._shutdown_runtime(), timeout=0.5)
+
+        assert cancel.is_set()
+        assert task.cancelled()
+        assert controller.state.has_detached_turn_worker()
+        assert len(deferred_closes) == 1
     finally:
         release_turn.set()
         task.cancel()

@@ -364,8 +364,10 @@ async def test_cancelled_turn_does_not_spawn_another_worker_until_it_finishes(
     try:
         while not first_started.is_set():
             await asyncio.sleep(0.001)
+        assert runtime.has_live_turn_worker()
         first.cancel()
         _ = await asyncio.gather(first, return_exceptions=True)
+        assert runtime.has_live_turn_worker()
 
         second = asyncio.create_task(run_agent_turn(runtime, "second"))
         await asyncio.sleep(0.1)
@@ -376,6 +378,7 @@ async def test_cancelled_turn_does_not_spawn_another_worker_until_it_finishes(
         await asyncio.wait_for(second, timeout=1)
         assert calls == 2
         assert second_started.is_set()
+        assert not runtime.has_live_turn_worker()
     finally:
         release_first.set()
         first.cancel()

@@ -33,15 +33,13 @@ class InflightControl(enum.StrEnum):
     EXIT_SHELL = "exit_shell"
 
 
-_GOAL_CONTROL_REASONS: dict[InflightControl, HostCancelReason] = {
-    InflightControl.PAUSE_GOAL: HostCancelReason.GOAL_PAUSE,
-    InflightControl.CLEAR_GOAL: HostCancelReason.GOAL_CLEAR,
-}
-
-
 def goal_control_reason(control: InflightControl) -> HostCancelReason | None:
     """Return the host reason for an in-flight goal control, if any."""
-    return _GOAL_CONTROL_REASONS.get(control)
+    if control is InflightControl.PAUSE_GOAL:
+        return HostCancelReason.GOAL_PAUSE
+    if control is InflightControl.CLEAR_GOAL:
+        return HostCancelReason.GOAL_CLEAR
+    return None
 
 
 def _inflight_control(text: str) -> InflightControl | None:
@@ -63,6 +61,7 @@ class ShellInputSnapshot:
     exit_requested: bool
     dispatch_running: bool
     awaiting_confirmation: bool
+    worker_running: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,10 +117,12 @@ def decide_input_action(
             if not stripped:
                 return IgnoreInput()
 
-            if snapshot.dispatch_running:
-                control = _inflight_control(stripped)
-                if control is not None:
-                    return RunInflightControl(control=control, submitted_text=stripped)
+            control = _inflight_control(stripped)
+            if control is not None and (
+                snapshot.dispatch_running
+                or (snapshot.worker_running and control is InflightControl.EXIT_SHELL)
+            ):
+                return RunInflightControl(control=control, submitted_text=stripped)
 
             if snapshot.awaiting_confirmation:
                 if looks_like_confirmation_answer(stripped):

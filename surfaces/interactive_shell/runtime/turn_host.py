@@ -120,6 +120,11 @@ class _DaemonTurnSlot:
             except Exception:
                 _logger.warning("Immediate turn cleanup failed", exc_info=True)
 
+    def is_occupied(self) -> bool:
+        """Return whether a blocking worker currently owns the slot."""
+        with self._lock:
+            return not self._available
+
 
 def _complete_daemon_turn(
     future: asyncio.Future[None],
@@ -198,6 +203,10 @@ class AgentTurnResources:
     def run_after_turn_worker(self, callback: Callable[[], None]) -> None:
         """Run cleanup once the blocking worker no longer owns turn state."""
         self._turn_slot.run_when_available(callback)
+
+    def has_live_turn_worker(self) -> bool:
+        """Return whether blocking turn work remains alive outside asyncio."""
+        return self._turn_slot.is_occupied()
 
 
 def _confirm_via_prompt(runtime: AgentTurnResources, prompt: str) -> str:
@@ -415,6 +424,7 @@ async def run_input_loop(
     input_reader: PromptInputReader,
     echo_console: Console,
     handle_input_action: Callable[[InputAction], Awaitable[bool]],
+    has_live_turn_worker: Callable[[], bool] | None = None,
 ) -> None:
     """Run the interactive session's main input loop until exit or close.
 
@@ -439,6 +449,9 @@ async def run_input_loop(
                 exit_requested=state.exit_requested,
                 dispatch_running=state.is_dispatch_running(),
                 awaiting_confirmation=state.is_awaiting_confirmation(),
+                worker_running=(
+                    has_live_turn_worker() if has_live_turn_worker is not None else False
+                ),
             ),
             needs_exclusive_stdin=lambda text: turn_needs_exclusive_stdin(
                 text,

@@ -259,6 +259,7 @@ class InteractiveShellController:
                         input_reader=self.input_reader,
                         echo_console=self.echo_console,
                         handle_input_action=self._handle_input_action,
+                        has_live_turn_worker=self.turn_runtime.has_live_turn_worker,
                     )
             finally:
                 await self._shutdown_runtime()
@@ -406,21 +407,21 @@ class InteractiveShellController:
         if self._ci_fix_status_cleanup is not None:
             self._ci_fix_status_cleanup()
             self._ci_fix_status_cleanup = None
-        graceful_turn = self.state.current_task if self._finish_exit_on_shutdown else None
+        active_turn = self.state.current_task
         detached_goal_control: HostCancelReason | None = None
         detached_goal_control_saved = False
         detached_exit_command: str | None = None
         self.state.request_exit()
-        if graceful_turn is not None:
+        if active_turn is not None and not active_turn.done():
             self.state.signal_current_dispatch()
         else:
             self.state.cancel_current_dispatch()
         await self.prompt.close()
 
-        if graceful_turn is not None and not graceful_turn.done():
+        if active_turn is not None and not active_turn.done():
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(graceful_turn),
+                    asyncio.shield(active_turn),
                     timeout=_INFLIGHT_EXIT_DRAIN_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
@@ -438,7 +439,7 @@ class InteractiveShellController:
                             exc_info=True,
                         )
                 self.state.cancel_current_dispatch()
-                await asyncio.gather(graceful_turn, return_exceptions=True)
+                await asyncio.gather(active_turn, return_exceptions=True)
             except asyncio.CancelledError:
                 log.debug("In-flight exit turn was cancelled before it drained")
             except Exception as exc:
@@ -455,6 +456,8 @@ class InteractiveShellController:
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 log.debug("%s task shutdown raised exception: %s", label, result)
         shutdown_loop_scheduler()
+        if self.turn_runtime.has_live_turn_worker():
+            self.state.mark_turn_worker_detached()
         if self._finish_exit_on_shutdown:
             self._finish_exit_on_shutdown = False
             if self._inflight_exit_command is not None:
