@@ -522,6 +522,59 @@ async def test_goal_control_runs_normally_if_dispatch_finishes_before_handling(
         assert controller.session.session_goal is None
 
 
+@pytest.mark.asyncio
+async def test_lower_priority_goal_control_is_consumed_with_the_active_dispatch() -> None:
+    import asyncio
+
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
+    from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
+    from core.agent_harness.spi.session_goal import apply_session_goal_control
+    from surfaces.interactive_shell.command_registry.dispatch import dispatch_slash
+
+    controller = _controller()
+    attach_session_goal(controller.session, SessionGoal(condition="keep going"))
+
+    async def _hold() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_hold())
+    cancel = HostCancelEvent()
+    controller.state.start_dispatch(task=task, cancel_event=cancel)
+    try:
+        assert await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.CLEAR_GOAL,
+                submitted_text="/goal clear",
+            )
+        )
+        assert await controller._handle_input_action(
+            RunInflightControl(
+                control=InflightControl.PAUSE_GOAL,
+                submitted_text="/goal pause",
+            )
+        )
+
+        assert cancel.reason is HostCancelReason.GOAL_CLEAR
+        assert controller.session.terminal.pending_inflight_goal_controls == {
+            HostCancelReason.GOAL_CLEAR.value: 1,
+            HostCancelReason.GOAL_PAUSE.value: 1,
+        }
+        assert apply_session_goal_control(controller.session, cancel.reason)
+        replacement = attach_session_goal(
+            controller.session,
+            SessionGoal(condition="review the result"),
+        )
+        for _ in range(2):
+            queued = await controller.state.queue.get()
+            controller.state.queue.task_done()
+            assert dispatch_slash(queued, controller.session, controller.service_console)
+
+        assert controller.session.session_goal is replacement
+    finally:
+        task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
 def test_inflight_goal_pause_keeps_input_open_and_does_not_leak_to_queued_turns() -> None:
     import asyncio
 
