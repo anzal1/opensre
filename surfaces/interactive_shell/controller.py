@@ -13,7 +13,10 @@ from rich.console import Console
 
 from config.repl_config import ReplConfig
 from core.agent_harness.spi.cancel import HostCancelReason
-from core.agent_harness.spi.session_goal import session_goal_is_active
+from core.agent_harness.spi.session_goal import (
+    apply_session_goal_control,
+    session_goal_is_active,
+)
 from core.agent_harness.spi.task_plan import discard_task_plan
 from core.domain.alerts import inbox as _alert_inbox
 from infrastructure.turn_host.session_lock import (
@@ -36,7 +39,6 @@ from surfaces.interactive_shell.runtime.exit_control import (
     record_inflight_shell_exit,
 )
 from surfaces.interactive_shell.runtime.goal_controls import (
-    apply_goal_control,
     mark_inflight_goal_control,
 )
 from surfaces.interactive_shell.runtime.input import (
@@ -289,7 +291,7 @@ class InteractiveShellController:
 
         try:
             with session_execution_lock(self.session.session_id, timeout=0):
-                if apply_goal_control(self.session, reason):
+                if apply_session_goal_control(self.session, reason):
                     SessionManager.for_session(self.session).flush(self.session)
         except SessionExecutionBusyError:
             return False
@@ -306,18 +308,14 @@ class InteractiveShellController:
         ):
             await asyncio.sleep(_GOAL_CONTROL_LOCK_RETRY_SECONDS)
 
-    def _persist_goal_control_after_worker_detach(self, reason: HostCancelReason) -> None:
-        """Persist explicit goal intent after the worker missed its exit deadline.
-
-        Forced exit transfers this narrow state mutation to the shutdown owner.
-        The detached worker shares the same session object and cancel reason, so
-        it observes the controlled goal if it later unwinds instead of restoring
-        pre-control state.
-        """
+    def _persist_goal_control_for_resume(self, reason: HostCancelReason) -> None:
+        """Preserve goal intent without mutating state owned by a detached worker."""
         from core.agent_harness import SessionManager
 
-        apply_goal_control(self.session, reason)
-        SessionManager.for_session(self.session).flush_session_goal_state(self.session)
+        SessionManager.for_session(self.session).persist_session_goal_control(
+            self.session,
+            reason.value,
+        )
 
     async def _handle_input_action(self, action: InputAction) -> bool:
         match action:
@@ -422,10 +420,11 @@ class InteractiveShellController:
                 goal_control = self.state.requested_goal_control()
                 if goal_control is not None:
                     try:
-                        self._persist_goal_control_after_worker_detach(goal_control)
+                        self._persist_goal_control_for_resume(goal_control)
                     except Exception:
                         log.warning(
-                            "Could not persist goal control during forced exit",
+                            "Could not save pending goal control before forced exit; "
+                            "resume may restore the prior goal",
                             exc_info=True,
                         )
                 self.state.cancel_current_dispatch()

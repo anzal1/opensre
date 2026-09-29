@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 import threading
 from collections.abc import Callable
@@ -18,11 +17,9 @@ from infrastructure.analytics.github_identity import identify_saved_github_usern
 from infrastructure.analytics.usage_context import claim_process_session_id
 from infrastructure.logging import install_shell_log_handler, quiet_noisy_third_party_loggers
 from infrastructure.terminal.theme import set_active_theme
-from infrastructure.turn_host.session_lock import session_execution_lock
 from surfaces.interactive_shell.controller import InteractiveShellController
 from surfaces.interactive_shell.runtime.context import create_repl_runtime
-from surfaces.interactive_shell.runtime.core.state import ReplState
-from surfaces.interactive_shell.runtime.goal_controls import apply_goal_control
+from surfaces.interactive_shell.runtime.session_shutdown import close_repl_session
 from surfaces.interactive_shell.runtime.startup.account_gate import (
     pass_sign_in_gate,
 )
@@ -32,8 +29,6 @@ from surfaces.interactive_shell.session import Session
 from surfaces.interactive_shell.ui.terminal_ui import render_terminal_ui
 from surfaces.shared.terminal.banner import animate_launch_wordmark
 from surfaces.shared.terminal.components.rendering import repl_clear_screen
-
-logger = logging.getLogger(__name__)
 
 # Fallback when a caller does not supply one. Forces a terminal because the
 # shell owns the screen; an embedding caller passes its own instead.
@@ -50,22 +45,6 @@ def _new_shell_session() -> Session:
     """
     session_id = claim_process_session_id()
     return Session(session_id=session_id) if session_id else Session()
-
-
-def _close_repl_session(session: Session, state: ReplState) -> None:
-    """Persist final session state, including an interrupted goal boundary."""
-    if state.has_detached_turn_worker():
-        logger.warning(
-            "Skipping final session close because detached turn work still owns session state"
-        )
-        return
-    goal_control = state.requested_goal_control()
-    manager = SessionManager.for_session(session)
-    with session_execution_lock(session.session_id):
-        manager.refresh_from_storage(session)
-        if goal_control is not None:
-            apply_goal_control(session, goal_control)
-        manager.close(session)
 
 
 async def run_repl_async(
@@ -149,7 +128,7 @@ async def run_repl_async(
         return 0
     finally:
         # True end-of-run teardown: persist and release the session's resources.
-        _close_repl_session(session, runtime_context.state)
+        close_repl_session(session, runtime_context.state)
 
 
 def _start_launch_banner(

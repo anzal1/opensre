@@ -177,8 +177,8 @@ def test_inflight_goal_pause_does_not_render_the_paused_state_twice() -> None:
 def test_inflight_goal_clear_acknowledges_without_clearing_a_new_goal() -> None:
     from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
     from core.agent_harness.spi.cancel import HostCancelReason
+    from core.agent_harness.spi.session_goal import apply_session_goal_control
     from surfaces.interactive_shell.runtime.goal_controls import (
-        apply_goal_control,
         mark_inflight_goal_control,
     )
 
@@ -186,7 +186,7 @@ def test_inflight_goal_clear_acknowledges_without_clearing_a_new_goal() -> None:
     console, buf = _console()
     assert _cmd_goal(session, console, ["set", "ship the fix"])
     mark_inflight_goal_control(session, HostCancelReason.GOAL_CLEAR)
-    assert apply_goal_control(session, HostCancelReason.GOAL_CLEAR)
+    assert apply_session_goal_control(session, HostCancelReason.GOAL_CLEAR)
     replacement = attach_session_goal(
         session,
         SessionGoal(condition="review the result", max_outer_turns=2),

@@ -326,9 +326,14 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
     import threading
 
     from core.agent_harness.session import InMemorySessionStore, SessionManager
+    from core.agent_harness.session.persistence.contracts import RestoreContextKey
     from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
-    from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
+    from core.agent_harness.session_goal.persist import (
+        SESSION_GOAL_STATE_CUSTOM_TYPE,
+        pending_session_goal_controls,
+    )
     from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
+    from surfaces.interactive_shell.session import Session
 
     worker_started = threading.Event()
     release_turn = threading.Event()
@@ -376,14 +381,36 @@ async def test_exit_control_bounds_uncooperative_worker_and_persists_goal_contro
         assert controller.state.has_detached_turn_worker()
         assert exit_finished == [True]
         stored_records = store.read(controller.session.session_id)
-        records = [
+        goal_records = [
             record
             for record in stored_records
             if record.get("type") == "custom_message"
             and record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
         ]
-        assert records[-1].get("content", {}).get("session_goal") is None
+        pending_controls = pending_session_goal_controls(stored_records)
+        assert controller.session.session_goal is not None
+        assert goal_records[-1].get("content", {}).get("session_goal", {}).get("status") == "active"
+        assert [control["reason"] for control in pending_controls] == ["goal_clear"]
         assert sum(record.get("type") == "leaf" for record in stored_records) == 1
+
+        restored = Session(session_id=controller.session.session_id, store=store)
+        SessionManager(store=store).restore_context(
+            restored,
+            {
+                RestoreContextKey.SESSION_GOAL_STATE: goal_records[-1]["content"],
+                RestoreContextKey.SESSION_GOAL_CONTROLS: pending_controls,
+            },
+        )
+
+        resumed_records = store.read(restored.session_id)
+        resumed_goal_records = [
+            record
+            for record in resumed_records
+            if record.get("custom_type") == SESSION_GOAL_STATE_CUSTOM_TYPE
+        ]
+        assert restored.session_goal is None
+        assert resumed_goal_records[-1].get("content", {}).get("session_goal") is None
+        assert pending_session_goal_controls(resumed_records) == []
     finally:
         release_turn.set()
         task.cancel()
@@ -755,7 +782,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
     from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
     from infrastructure.turn_host.session_lock import session_execution_lock
     from surfaces.interactive_shell.controller import InteractiveShellController
-    from surfaces.interactive_shell.main import _close_repl_session
+    from surfaces.interactive_shell.runtime.session_shutdown import close_repl_session
     from surfaces.interactive_shell.runtime.turn_host import run_agent_turn_queue
     from surfaces.interactive_shell.session import Session
 
@@ -820,7 +847,7 @@ async def test_shutdown_persists_pause_after_boundary_wait_is_cancelled() -> Non
         release_lease.set()
         await asyncio.to_thread(lease_worker.join, 1)
         assert not lease_worker.is_alive()
-        await asyncio.to_thread(_close_repl_session, session, controller.state)
+        await asyncio.to_thread(close_repl_session, session, controller.state)
 
         records = [
             record
@@ -843,8 +870,8 @@ def test_shutdown_persists_a_pending_goal_clear() -> None:
     from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
     from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
     from core.agent_harness.spi.cancel import HostCancelEvent, HostCancelReason
-    from surfaces.interactive_shell.main import _close_repl_session
     from surfaces.interactive_shell.runtime.core.state import ReplState
+    from surfaces.interactive_shell.runtime.session_shutdown import close_repl_session
     from surfaces.interactive_shell.session import Session
 
     store = InMemorySessionStore()
@@ -862,7 +889,7 @@ def test_shutdown_persists_a_pending_goal_clear() -> None:
     state.attach_cancel_event(cancel)
     state.request_exit()
 
-    _close_repl_session(session, state)
+    close_repl_session(session, state)
 
     records = [
         record
@@ -876,7 +903,7 @@ def test_shutdown_persists_a_pending_goal_clear() -> None:
 def test_shutdown_does_not_wait_for_a_detached_turn_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import surfaces.interactive_shell.main as main_entrypoint
+    import surfaces.interactive_shell.runtime.session_shutdown as session_shutdown
     from surfaces.interactive_shell.runtime.core.state import ReplState
     from surfaces.interactive_shell.session import Session
 
@@ -885,9 +912,9 @@ def test_shutdown_does_not_wait_for_a_detached_turn_worker(
 
     state = ReplState()
     state.mark_turn_worker_detached()
-    monkeypatch.setattr(main_entrypoint, "session_execution_lock", _unexpected_lock)
+    monkeypatch.setattr(session_shutdown, "session_execution_lock", _unexpected_lock)
 
-    main_entrypoint._close_repl_session(Session(), state)
+    session_shutdown.close_repl_session(Session(), state)
 
 
 @pytest.mark.asyncio

@@ -4,24 +4,7 @@ from __future__ import annotations
 
 from core.agent_harness import SessionCore
 from core.agent_harness.spi.cancel import HostCancelReason
-from core.agent_harness.spi.session_goal import (
-    clear_session_goal,
-    pause_active_session_goal,
-)
-from core.agent_harness.spi.session_state import clear_pending_autosubmit, session_terminal
-
-
-def apply_goal_control(session: SessionCore, reason: HostCancelReason) -> bool:
-    """Apply ``reason`` after the active worker releases session ownership."""
-    if reason is HostCancelReason.GOAL_PAUSE:
-        return pause_active_session_goal(session) is not None
-    if reason is HostCancelReason.GOAL_CLEAR:
-        clear_pending_autosubmit(session)
-        if getattr(session, "session_goal", None) is None:
-            return False
-        clear_session_goal(session)
-        return True
-    raise ValueError(f"Not a goal control reason: {reason}")
+from core.agent_harness.spi.session_state import session_terminal
 
 
 def mark_inflight_goal_control(session: SessionCore, reason: HostCancelReason) -> None:
@@ -52,7 +35,6 @@ def consume_inflight_goal_control(session: SessionCore, reason: HostCancelReason
 
 
 __all__ = [
-    "apply_goal_control",
     "consume_inflight_goal_control",
     "mark_inflight_goal_control",
 ]

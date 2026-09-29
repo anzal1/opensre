@@ -19,6 +19,8 @@ from typing import Any
 
 import pytest
 
+from core.agent_harness.session.persistence.contracts import RestoreContextKey
+from core.agent_harness.session.persistence.jsonl_repo import JsonlSessionRepo
 from core.agent_harness.session.persistence.jsonl_store import JsonlSessionStore
 from core.agent_harness.session.persistence.paths import session_path
 
@@ -110,7 +112,7 @@ def test_flush_still_persists_context_and_messages(storage_home: Path) -> None:
     assert any(rec.get("type") == "message" and rec["role"] == "user" for rec in records)
 
 
-def test_goal_state_flush_does_not_finalize_the_active_turn(storage_home: Path) -> None:
+def test_goal_control_state_flush_does_not_finalize_the_active_turn(storage_home: Path) -> None:
     from core.agent_harness.session_goal.goal import SessionGoal
     from core.agent_harness.session_goal.persist import SESSION_GOAL_STATE_CUSTOM_TYPE
 
@@ -122,9 +124,9 @@ def test_goal_state_flush_does_not_finalize_the_active_turn(storage_home: Path) 
     storage.open_session(session)
     storage.append_turn(session, "chat", "start")
 
-    storage.flush_session_goal_state(session)
+    storage.flush_session_goal_control_state(session)
     session.session_goal = None
-    storage.flush_session_goal_state(session)
+    storage.flush_session_goal_control_state(session)
 
     records = [
         json.loads(line)
@@ -135,6 +137,30 @@ def test_goal_state_flush_does_not_finalize_the_active_turn(storage_home: Path) 
     ]
     assert goal_states[-1]["content"]["session_goal"] is None
     assert not any(record.get("type") == "leaf" for record in records)
+
+
+def test_goal_control_sidecar_is_durable_and_acknowledged(storage_home: Path) -> None:
+    storage = JsonlSessionStore()
+    session = _session()
+    storage.open_session(session)
+    storage.append_turn(session, "chat", "start")
+
+    control_id = storage.append_session_goal_control(session.session_id, "goal_clear")
+
+    loaded = JsonlSessionRepo().load_session(session.session_id)
+    assert loaded is not None
+    assert loaded[RestoreContextKey.SESSION_GOAL_CONTROLS] == [
+        {"control_id": control_id, "reason": "goal_clear"}
+    ]
+    storage.complete_session_goal_control(session.session_id, control_id)
+    reloaded = JsonlSessionRepo().load_session(session.session_id)
+    assert reloaded is not None
+    assert reloaded[RestoreContextKey.SESSION_GOAL_CONTROLS] == []
+
+
+def test_goal_control_write_failure_is_not_suppressed(storage_home: Path) -> None:
+    with pytest.raises(OSError, match="Could not persist session-goal control"):
+        JsonlSessionStore().append_session_goal_control("missing-session", "goal_clear")
 
 
 def test_flush_parses_the_session_file_once(

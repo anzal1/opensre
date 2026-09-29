@@ -216,25 +216,8 @@ class InMemorySessionStore:
             records = self._files.get(session.session_id, records)
         self._append_session_goal_state(session, records)
         records = self._files.get(session.session_id, records)
-        if hasattr(session, "task_plan"):
-            from core.agent_harness.task_plan.persist import (
-                TASK_PLAN_STATE_CUSTOM_TYPE,
-                should_persist_task_plan_state,
-                task_plan_state_snapshot,
-            )
-
-            plan_state = task_plan_state_snapshot(session)
-            if should_persist_task_plan_state(plan_state, prior_records=records):
-                self._append(
-                    session.session_id,
-                    "custom_message",
-                    {
-                        "custom_type": TASK_PLAN_STATE_CUSTOM_TYPE,
-                        "content": plan_state or {},
-                        "display": False,
-                    },
-                )
-                records = self._files.get(session.session_id, records)
+        self._append_task_plan_state(session, records)
+        records = self._files.get(session.session_id, records)
         if hasattr(session, "pending_user_choice"):
             from core.agent_harness.session.pending_choice import (
                 PENDING_USER_CHOICE_STATE_CUSTOM_TYPE,
@@ -276,11 +259,55 @@ class InMemorySessionStore:
             },
         )
 
-    def flush_session_goal_state(self, session: SessionPersistenceSource) -> None:
-        """Persist only goal/CTA state while a detached turn still owns its lease."""
+    def flush_session_goal_control_state(self, session: SessionPersistenceSource) -> None:
+        """Persist goal and task-plan state changed by a goal control."""
         records = self._files.get(session.session_id)
-        if records:
-            self._append_session_goal_state(session, records)
+        if records is None:
+            raise FileNotFoundError(session.session_id)
+        self._append_session_goal_state(session, records)
+        records = self._files.get(session.session_id, records)
+        self._append_task_plan_state(session, records)
+
+    def append_session_goal_control(self, session_id: str, reason: str) -> str:
+        """Durably record a goal control outside the live conversation branch."""
+        from core.agent_harness.session_goal.persist import (
+            SESSION_GOAL_CONTROL_RECORD_TYPE,
+            SESSION_GOAL_CONTROL_REQUESTED,
+        )
+
+        control_id = uuid.uuid4().hex
+        entry_id = self._append(
+            session_id,
+            SESSION_GOAL_CONTROL_RECORD_TYPE,
+            {
+                "control_id": control_id,
+                "reason": reason,
+                "status": SESSION_GOAL_CONTROL_REQUESTED,
+            },
+            sidecar=True,
+        )
+        if not entry_id:
+            raise OSError("Could not persist session-goal control")
+        return control_id
+
+    def complete_session_goal_control(self, session_id: str, control_id: str) -> None:
+        """Acknowledge a previously recorded goal control."""
+        from core.agent_harness.session_goal.persist import (
+            SESSION_GOAL_CONTROL_APPLIED,
+            SESSION_GOAL_CONTROL_RECORD_TYPE,
+        )
+
+        entry_id = self._append(
+            session_id,
+            SESSION_GOAL_CONTROL_RECORD_TYPE,
+            {
+                "control_id": control_id,
+                "status": SESSION_GOAL_CONTROL_APPLIED,
+            },
+            sidecar=True,
+        )
+        if not entry_id:
+            raise OSError("Could not acknowledge session-goal control")
 
     def _append_session_goal_state(
         self,
@@ -303,6 +330,31 @@ class InMemorySessionStore:
                 {
                     "custom_type": SESSION_GOAL_STATE_CUSTOM_TYPE,
                     "content": goal_state,
+                    "display": False,
+                },
+            )
+
+    def _append_task_plan_state(
+        self,
+        session: SessionPersistenceSource,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if not hasattr(session, "task_plan"):
+            return
+        from core.agent_harness.task_plan.persist import (
+            TASK_PLAN_STATE_CUSTOM_TYPE,
+            should_persist_task_plan_state,
+            task_plan_state_snapshot,
+        )
+
+        plan_state = task_plan_state_snapshot(session)
+        if should_persist_task_plan_state(plan_state, prior_records=records):
+            self._append(
+                session.session_id,
+                "custom_message",
+                {
+                    "custom_type": TASK_PLAN_STATE_CUSTOM_TYPE,
+                    "content": plan_state or {},
                     "display": False,
                 },
             )
