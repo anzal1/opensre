@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from rich.console import Console
 
+from core.agent_harness.session import SessionCore
 from infrastructure.terminal.prompt_support import print_session_resume_hint
-from surfaces.interactive_shell.session import Session
 from surfaces.interactive_shell.ui import DIM, HIGHLIGHT
 
 
@@ -28,7 +28,12 @@ def _flush_analytics_on_exit(console: Console) -> None:
         shutdown_analytics(flush=True)
 
 
-def finish_shell_exit(session: Session, console: Console) -> None:
+def record_inflight_shell_exit(session: SessionCore, command: str) -> None:
+    """Record an exit command that bypasses queued slash dispatch."""
+    session.record("slash", command)
+
+
+def finish_shell_exit(session: SessionCore, console: Console) -> None:
     """Render the standard resume hint and finish clean shell shutdown work."""
     # Defend against a prior inline menu that left the cursor mid-line.
     from surfaces.shared.terminal.components.choice_menu import prepare_repl_output_line
@@ -41,4 +46,4 @@ def finish_shell_exit(session: Session, console: Console) -> None:
     console.print(f"[{HIGHLIGHT}]goodbye.[/]")
 
 
-__all__ = ["finish_shell_exit"]
+__all__ = ["finish_shell_exit", "record_inflight_shell_exit"]

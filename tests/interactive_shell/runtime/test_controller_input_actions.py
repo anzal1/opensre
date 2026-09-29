@@ -261,23 +261,31 @@ async def test_exit_control_stops_the_running_dispatch_without_queueing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
+    import threading
 
     from core.agent_harness.spi.cancel import HostCancelEvent
 
-    flushed: list[bool] = []
+    worker_started = threading.Event()
+    release_turn = threading.Event()
+    turn_finished = threading.Event()
+    flushed_after_turn: list[bool] = []
     monkeypatch.setattr(
         "surfaces.interactive_shell.runtime.exit_control._flush_analytics_on_exit",
-        lambda _console: flushed.append(True),
+        lambda _console: flushed_after_turn.append(turn_finished.is_set()),
     )
     controller = _controller()
-
-    async def _hold() -> None:
-        await asyncio.Event().wait()
-
-    task = asyncio.create_task(_hold())
     cancel = HostCancelEvent()
+
+    def _hold() -> None:
+        worker_started.set()
+        cancel.wait()
+        release_turn.wait()
+        turn_finished.set()
+
+    task = asyncio.create_task(asyncio.to_thread(_hold))
     controller.state.start_dispatch(task=task, cancel_event=cancel)
     try:
+        assert await asyncio.to_thread(worker_started.wait, 1)
         kept = await controller._handle_input_action(
             RunInflightControl(
                 control=InflightControl.EXIT_SHELL,
@@ -288,13 +296,24 @@ async def test_exit_control_stops_the_running_dispatch_without_queueing(
         assert kept is False
         assert controller.state.exit_requested
         assert cancel.is_set()
+        assert not task.cancelled()
         assert controller.state.queue.empty()
-        assert flushed == []
+        assert flushed_after_turn == []
+        assert controller.session.history == []
 
-        await controller._shutdown_runtime()
+        shutdown = asyncio.create_task(controller._shutdown_runtime())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert flushed_after_turn == []
+        release_turn.set()
+        await shutdown
 
-        assert flushed == [True]
+        assert turn_finished.is_set()
+        assert flushed_after_turn == [True]
+        assert controller.session.history[-1]["type"] == "slash"
+        assert controller.session.history[-1]["text"] == "/exit"
     finally:
+        release_turn.set()
         task.cancel()
         _ = await asyncio.gather(task, return_exceptions=True)
 
@@ -509,7 +528,7 @@ async def test_goal_pause_after_dispatch_finish_still_pauses_before_queued_work(
 
 
 @pytest.mark.asyncio
-async def test_goal_clear_applies_before_already_queued_work() -> None:
+async def test_goal_clear_does_not_remove_a_goal_created_by_earlier_queued_work() -> None:
     import asyncio
 
     from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
@@ -525,14 +544,25 @@ async def test_goal_clear_applies_before_already_queued_work() -> None:
     finish_current_turn = asyncio.Event()
     submitted: list[str] = []
     goals_before_queued_turns: list[object] = []
+    replacement: SessionGoal | None = None
 
     async def _run_turn(text: str) -> None:
+        nonlocal replacement
         submitted.append(text)
         if text == "current goal turn":
             started.set()
             await finish_current_turn.wait()
             return
         goals_before_queued_turns.append(controller.session.session_goal)
+        if text == "earlier queued turn":
+            replacement = attach_session_goal(
+                controller.session,
+                SessionGoal(condition="review the result", max_outer_turns=2),
+            )
+            return
+        from surfaces.interactive_shell.command_registry.dispatch import dispatch_slash
+
+        assert dispatch_slash(text, controller.session, controller.service_console)
 
     worker = asyncio.create_task(
         run_agent_turn_queue(
@@ -562,9 +592,9 @@ async def test_goal_clear_applies_before_already_queued_work() -> None:
         finish_current_turn.set()
         await asyncio.wait_for(controller.state.queue.join(), timeout=1)
 
-        assert controller.session.session_goal is None
+        assert controller.session.session_goal is replacement
         assert submitted == ["current goal turn", "earlier queued turn", "/goal clear"]
-        assert goals_before_queued_turns == [None, None]
+        assert goals_before_queued_turns == [None, replacement]
     finally:
         controller.state.request_exit()
         await controller.state.queue.put("")

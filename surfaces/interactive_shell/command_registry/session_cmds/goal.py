@@ -250,10 +250,10 @@ def _clear(session: Session, console: Console) -> bool:
         session,
         HostCancelReason.GOAL_CLEAR,
     )
+    if follows_inflight_clear:
+        console.print(f"[{HIGHLIGHT}]goal cleared.[/]")
+        return True
     if getattr(session, "session_goal", None) is None:
-        if follows_inflight_clear:
-            console.print(f"[{HIGHLIGHT}]goal cleared.[/]")
-            return True
         console.print(f"[{DIM}]no goal to clear.[/]")
         return True
     clear_pending_autosubmit(session)

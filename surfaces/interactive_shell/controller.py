@@ -31,7 +31,10 @@ from surfaces.interactive_shell.runtime.core.state import (
     ReplState,
     SpinnerState,
 )
-from surfaces.interactive_shell.runtime.exit_control import finish_shell_exit
+from surfaces.interactive_shell.runtime.exit_control import (
+    finish_shell_exit,
+    record_inflight_shell_exit,
+)
 from surfaces.interactive_shell.runtime.goal_controls import (
     apply_goal_control,
     mark_inflight_goal_control,
@@ -227,6 +230,7 @@ class InteractiveShellController:
         self.tasks: list[tuple[str, asyncio.Task[None]]] = []
         self._ci_fix_status_cleanup: Callable[[], None] | None = None
         self._finish_exit_on_shutdown = False
+        self._inflight_exit_command: str | None = None
 
     async def start_interactive_shell(self) -> None:
         with _alert_listener(self.config, self.service_console, existing=self.inbox) as inbox:
@@ -321,8 +325,9 @@ class InteractiveShellController:
             ):
                 self.prompt.render_submitted_prompt(self.echo_console, text)
                 self.state.request_exit()
-                self.state.cancel_current_dispatch()
+                self.state.signal_current_dispatch()
                 self._finish_exit_on_shutdown = True
+                self._inflight_exit_command = text
                 return False
             case RunInflightControl(control=control, submitted_text=text) if (
                 reason := goal_control_reason(control)
@@ -383,9 +388,21 @@ class InteractiveShellController:
         if self._ci_fix_status_cleanup is not None:
             self._ci_fix_status_cleanup()
             self._ci_fix_status_cleanup = None
+        graceful_turn = self.state.current_task if self._finish_exit_on_shutdown else None
         self.state.request_exit()
-        self.state.cancel_current_dispatch()
+        if graceful_turn is not None:
+            self.state.signal_current_dispatch()
+        else:
+            self.state.cancel_current_dispatch()
         await self.prompt.close()
+
+        if graceful_turn is not None and not graceful_turn.done():
+            try:
+                await asyncio.shield(graceful_turn)
+            except asyncio.CancelledError:
+                log.debug("In-flight exit turn was cancelled before it drained")
+            except Exception as exc:
+                log.debug("In-flight exit turn ended with exception: %s", exc)
 
         for _label, task in self.tasks:
             task.cancel()
@@ -400,6 +417,9 @@ class InteractiveShellController:
         shutdown_loop_scheduler()
         if self._finish_exit_on_shutdown:
             self._finish_exit_on_shutdown = False
+            if self._inflight_exit_command is not None:
+                record_inflight_shell_exit(self.session, self._inflight_exit_command)
+                self._inflight_exit_command = None
             finish_shell_exit(self.session, self.service_console)
 
 

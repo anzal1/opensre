@@ -174,7 +174,8 @@ def test_inflight_goal_pause_does_not_render_the_paused_state_twice() -> None:
     assert "already paused" not in out
 
 
-def test_inflight_goal_clear_reports_success_after_boundary_clear() -> None:
+def test_inflight_goal_clear_acknowledges_without_clearing_a_new_goal() -> None:
+    from core.agent_harness.session_goal.goal import SessionGoal, attach_session_goal
     from core.agent_harness.spi.cancel import HostCancelReason
     from surfaces.interactive_shell.runtime.goal_controls import (
         apply_goal_control,
@@ -186,6 +187,10 @@ def test_inflight_goal_clear_reports_success_after_boundary_clear() -> None:
     assert _cmd_goal(session, console, ["set", "ship the fix"])
     mark_inflight_goal_control(session, HostCancelReason.GOAL_CLEAR)
     assert apply_goal_control(session, HostCancelReason.GOAL_CLEAR)
+    replacement = attach_session_goal(
+        session,
+        SessionGoal(condition="review the result", max_outer_turns=2),
+    )
 
     buf.truncate(0)
     buf.seek(0)
@@ -194,6 +199,7 @@ def test_inflight_goal_clear_reports_success_after_boundary_clear() -> None:
     out = buf.getvalue()
     assert out.count("goal cleared.") == 1
     assert "no goal to clear" not in out
+    assert session.session_goal is replacement
 
 
 def test_repeated_idle_goal_pause_still_reports_the_current_state() -> None:

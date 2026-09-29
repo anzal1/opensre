@@ -254,7 +254,8 @@ class ReplState:
             self.current_cancel_event = None
         self.phase = TurnPhase.IDLE
 
-    def cancel_current_dispatch(self) -> None:
+    def signal_current_dispatch(self) -> None:
+        """Request cooperative turn shutdown without cancelling its asyncio task."""
         # Mark the cancel intent first, but only when there is something to
         # cancel, so an idle no-op call does not leave a stale CANCELLING phase.
         if (
@@ -267,6 +268,9 @@ class ReplState:
             self.current_cancel_event.set()
         if self.confirm_event is not None:
             self.confirm_event.set()
+
+    def cancel_current_dispatch(self) -> None:
+        self.signal_current_dispatch()
         task = self.current_task
         if task is not None and not task.done():
             if self.loop is not None:

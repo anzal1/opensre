@@ -688,6 +688,7 @@ def test_goal_control_retained_during_turn_stops_a_new_shell_goal(
         pending_prompt_plain_turn=True,
     )
     cancel = HostCancelEvent()
+    painted: list[str] = []
 
     def _chat(_message: str) -> TurnResult:
         attach_session_goal(
@@ -716,6 +717,7 @@ def test_goal_control_retained_during_turn_stops_a_new_shell_goal(
         "/goal set keep going",
         cancel_requested=cancel.is_set,
         cancel_reason=lambda: cancel.reason,
+        on_progress=lambda goal: painted.append(goal.last_reason),
     )
 
     assert cancel.is_set() is False
@@ -725,6 +727,10 @@ def test_goal_control_retained_during_turn_stops_a_new_shell_goal(
     assert session.terminal.pending_prompt_default is None
     assert session.terminal.pending_prompt_autosubmit is False
     assert session.terminal.pending_prompt_plain_turn is False
+    if reason is HostCancelReason.GOAL_CLEAR:
+        assert SessionGoalReason.PAUSED_BY_USER not in painted
+    else:
+        assert SessionGoalReason.PAUSED_BY_USER in painted
 
 
 def test_headless_first_goal_turn_reads_pause_arriving_during_that_turn() -> None:

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from core.agent_harness.session import SessionCore
 from core.agent_harness.spi.cancel import HostCancelReason
 from core.agent_harness.spi.session_goal import (
     clear_session_goal,
     pause_active_session_goal,
 )
 from core.agent_harness.spi.session_state import clear_pending_autosubmit, session_terminal
-from surfaces.interactive_shell.session import Session
 
 
-def apply_goal_control(session: Session, reason: HostCancelReason) -> bool:
+def apply_goal_control(session: SessionCore, reason: HostCancelReason) -> bool:
     """Apply ``reason`` after the active worker releases session ownership."""
     if reason is HostCancelReason.GOAL_PAUSE:
         return pause_active_session_goal(session) is not None
@@ -24,7 +24,7 @@ def apply_goal_control(session: Session, reason: HostCancelReason) -> bool:
     raise ValueError(f"Not a goal control reason: {reason}")
 
 
-def mark_inflight_goal_control(session: Session, reason: HostCancelReason) -> None:
+def mark_inflight_goal_control(session: SessionCore, reason: HostCancelReason) -> None:
     """Remember that the queued slash command follows boundary handling."""
     terminal = session_terminal(session)
     if terminal is None:
@@ -35,7 +35,7 @@ def mark_inflight_goal_control(session: Session, reason: HostCancelReason) -> No
     )
 
 
-def consume_inflight_goal_control(session: Session, reason: HostCancelReason) -> bool:
+def consume_inflight_goal_control(session: SessionCore, reason: HostCancelReason) -> bool:
     """Consume one queued slash command already handled at the boundary."""
     terminal = session_terminal(session)
     if terminal is None:
