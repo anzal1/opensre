@@ -294,6 +294,17 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
             "User says switch to local llama without a concrete provider (clarify the provider)",
         ),
     ),
+    "/new": _mcp(
+        "Start a new session while preserving the current LLM conversation context and "
+        "accumulated infra context. Rotates the session ID and resets all session state "
+        "while keeping the conversation thread so you can continue seamlessly in a fresh session file.",
+        "User wants to continue a conversation in a new session after /resume",
+        "User asks to start a new session without losing their current conversation",
+        anti_examples=(
+            "User wants to clear the screen (use /clear)",
+            "User asks to list sessions (use /sessions)",
+        ),
+    ),
     "/onboard": _mcp(
         "Launch the interactive LLM onboarding wizard (handoff if run inside the REPL).",
         "User asks to run onboarding or reconfigure the LLM provider",
@@ -314,16 +325,11 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "User asks about remote deployment status, health, or operations",
         anti_examples=("Vague connect to X without remote/hosted context (clarify the target)",),
     ),
-    "/new": _mcp(
-        "Start a new session while preserving the current LLM conversation context and "
-        "accumulated infra context. Rotates the session ID and resets all session state "
-        "while keeping the conversation thread so you can continue seamlessly in a fresh session file.",
-        "User wants to continue a conversation in a new session after /resume",
-        "User asks to start a new session without losing their current conversation",
-        anti_examples=(
-            "User wants to clear the screen (use /clear)",
-            "User asks to list sessions (use /sessions)",
-        ),
+    "/rename": _mcp(
+        "Rename the current session with /rename <name>; "
+        "/rename --reset restores its automatic title.",
+        "User explicitly asks to rename the current session or reset its name",
+        anti_examples=("User asks to rename a different saved session",),
     ),
     "/resume": _mcp(
         "Restore the conversation context from a previous session. "

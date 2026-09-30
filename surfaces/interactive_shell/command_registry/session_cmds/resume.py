@@ -58,7 +58,7 @@ def _interactive_resume_menu(session: Session, console: Console) -> bool:
         sid = entry["session_id"]
         if sid == session.session_id:
             continue
-        title = entry.get("conversation_title") or ""
+        title = entry.get("name") or entry.get("conversation_title") or ""
         if not title:
             continue
         items.append(
@@ -230,13 +230,23 @@ def _lookup_resume_session_data(
 
     repo = default_session_repo()
     data = repo.load_session(prefix)
-    if data is None and len(prefix) >= 3:
-        candidates = [
-            e
-            for e in repo.load_recent(20)
-            if prefix.lower() in (e.get("name") or "").lower()
-            and e["session_id"] != session.session_id
-        ]
+    name_query = " ".join(prefix.lower().split())
+    if data is None and len(name_query) >= 3:
+        recent = repo.load_recent(20)
+        candidates = [e for e in recent if (e.get("name") or "").lower() == prefix.lower()]
+        current_exact = any(e["session_id"] == session.session_id for e in candidates)
+        candidates = [e for e in candidates if e["session_id"] != session.session_id]
+        if not candidates:
+            for entry in recent:
+                if entry["session_id"] == session.session_id:
+                    continue
+                name = " ".join((entry.get("name") or "").lower().split())
+                # An exact current name must not select a whitespace-only variant.
+                if name_query in name and (not current_exact or name != name_query):
+                    candidates.append(entry)
+        if not candidates and current_exact:
+            console.print(f"[{DIM}]'{escape(prefix)}' is the current session.[/]")
+            return None
         if len(candidates) == 1:
             data = repo.load_session(candidates[0]["session_id"])
         elif len(candidates) > 1:
@@ -301,7 +311,7 @@ def _cmd_resume(session: Session, console: Console, args: list[str]) -> bool:
         _record_resume_slash(session, args)
         return True
 
-    prefix = args[0].strip()
+    prefix = " ".join(args).strip()
     session_prefix = prefix.split(":", 1)[0]
 
     if session.session_id.startswith(session_prefix) and ":" not in prefix:
