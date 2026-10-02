@@ -300,6 +300,39 @@ class TestKnownModelCoverage:
         assert rate is not None
         assert rate == usd_per_token_blended("claude-fable-5")
 
+    @pytest.mark.parametrize(
+        ("model", "input_rate", "output_rate", "cache_read_rate", "cache_write_rate"),
+        [
+            # #6497: per 1M tokens. Cache reads are 0.1x on Sonnet 5.5,
+            # 0.05x on Opus 5.5 and 0.025x on Fable 5.1.
+            ("claude-sonnet-5-5", 2.00, 10.00, 0.20, 2.50),
+            ("claude-opus-5-5", 4.00, 20.00, 0.20, 5.00),
+            ("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50),
+        ],
+    )
+    def test_claude_5_5_family_has_prices(
+        self,
+        model: str,
+        input_rate: float,
+        output_rate: float,
+        cache_read_rate: float,
+        cache_write_rate: float,
+    ) -> None:
+        usage = TokenUsage(
+            input_tokens=100,
+            cache_read_input_tokens=2000,
+            cache_creation_input_tokens=500,
+            output_tokens=50,
+        )
+        expected = (
+            100 * input_rate + 2000 * cache_read_rate + 500 * cache_write_rate + 50 * output_rate
+        ) / 1_000_000
+        assert usd_for_usage(usage, model) == pytest.approx(expected)
+        # Bedrock and date-suffixed ids resolve to the same row, not to an
+        # older family member such as claude-opus-5.
+        assert usd_per_token_blended(f"anthropic.{model}") == usd_per_token_blended(model)
+        assert usd_per_token_blended(f"{model}-20261001") == usd_per_token_blended(model)
+
     def test_codex_default_models_have_prices(self) -> None:
         # Same guarantee for the codex side. ``gpt-5-codex`` is the
         # default model the Codex CLI configures for paid accounts.

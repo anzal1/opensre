@@ -149,6 +149,19 @@ _LOCAL_MODEL_PRICES: dict[str, ModelPrice] = {
     "gpt-5.6-sol": _price(5.00, 30.00, cache_read_usd_per_million=0.50),
     "gpt-5.6-terra": _price(2.50, 15.00, cache_read_usd_per_million=0.25),
     "gpt-5.6-luna": _price(1.00, 6.00, cache_read_usd_per_million=0.10),
+    # Claude 5.5-family models (#6497), absent from litellm's bundled table at
+    # the pinned version. Per 1M tokens, from
+    # https://platform.claude.com/docs/en/about-claude/pricing. Cache reads
+    # break from the usual 0.1x: 0.05x on Opus 5.5, 0.025x on Fable 5.1.
+    "claude-sonnet-5-5": _price(
+        2.00, 10.00, cache_read_usd_per_million=0.20, cache_write_usd_per_million=2.50
+    ),
+    "claude-opus-5-5": _price(
+        4.00, 20.00, cache_read_usd_per_million=0.20, cache_write_usd_per_million=5.00
+    ),
+    "claude-fable-5-1": _price(
+        10.00, 50.00, cache_read_usd_per_million=0.25, cache_write_usd_per_million=12.50
+    ),
     # claude-3-5-sonnet-20241022 — retired, frozen historical rate. litellm's
     # current table only keeps this generation under Bedrock-routed keys
     # (e.g. anthropic.claude-3-5-sonnet-20241022-v2:0), not the bare
