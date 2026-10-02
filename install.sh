@@ -34,6 +34,9 @@ INSTALL_CHANNEL_EXPLICIT=0
 INSTALL_ORIGIN=""
 [ -n "${OPENSRE_INSTALL_CHANNEL:-}" ] && INSTALL_CHANNEL_EXPLICIT=1
 MAIN_RELEASE_TAG="${OPENSRE_MAIN_RELEASE_TAG:-main-build}"
+# "api" while release metadata comes from api.github.com; "web" once the
+# installer has fallen back to github.com because the API rate limit is spent.
+RELEASE_METADATA_SOURCE="api"
 BIN_NAME="opensre"
 requested_version="${OPENSRE_VERSION:-}"
 
@@ -331,7 +334,48 @@ release_has_asset() {
   local release_json="$1"
   local asset_name="$2"
 
+  if [ "$RELEASE_METADATA_SOURCE" = "web" ]; then
+    # No asset list without the API, so ask the download URL directly.
+    curl --fail --silent --location --head --retry 3 --retry-delay 1 \
+      -H "User-Agent: opensre-install-script" \
+      -o /dev/null \
+      "https://github.com/${REPO}/releases/download/${release_tag}/${asset_name}" \
+      >/dev/null 2>&1
+    return
+  fi
+
   printf '%s' "$release_json" | tr -d '\r\n\t ' | grep -F "\"name\":\"${asset_name}\"" >/dev/null 2>&1
+}
+
+# Anonymous api.github.com calls are capped at 60 an hour per IP, and shared
+# egress (office NAT, CI runners, Docker builds) uses that up quickly. The
+# rate_limit endpoint itself is not counted, so it tells us whether a failed
+# metadata call was the cap or something we should not paper over.
+github_api_rate_limited() {
+  local body
+
+  body="$(curl --silent --show-error --location \
+    -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: opensre-install-script" \
+    "https://api.github.com/rate_limit" 2>/dev/null)" || return 1
+
+  printf '%s' "$body" | tr -d '\r\n\t ' | grep -Eq '"core":\{[^}]*"remaining":0[,}]'
+}
+
+# github.com/<repo>/releases/latest redirects to /releases/tag/<tag> and is not
+# subject to the API rate limit.
+resolve_latest_tag_from_web() {
+  local location
+
+  location="$(curl --silent --show-error --retry 3 --retry-delay 1 \
+    -H "User-Agent: opensre-install-script" \
+    -o /dev/null -w '%{redirect_url}' \
+    "https://github.com/${REPO}/releases/latest")" || return 1
+
+  case "$location" in
+    */releases/tag/?*) printf '%s\n' "${location##*/releases/tag/}" ;;
+    *) return 1 ;;
+  esac
 }
 
 build_archive_name() {
@@ -987,6 +1031,12 @@ resolve_release_metadata() {
   release_tag=""
 
   release_json="$(fetch_release_json "$version")" || {
+    if github_api_rate_limited; then
+      warn "GitHub API rate limit reached for this IP (60 requests an hour without a token). Resolving the release from github.com instead."
+      resolve_release_metadata_from_web
+      return
+    fi
+
     if [ "$INSTALL_CHANNEL" = "main" ]; then
       die "Failed to query main build metadata from GitHub."
     fi
@@ -1008,6 +1058,27 @@ resolve_release_metadata() {
   else
     [ -n "$version" ] || die "Failed to determine the release version."
   fi
+}
+
+# Download URLs are deterministic once the tag is known, so the API was only
+# ever needed for the tag and the asset list (see release_has_asset).
+resolve_release_metadata_from_web() {
+  local latest_tag
+
+  RELEASE_METADATA_SOURCE="web"
+  release_json=""
+
+  if [ "$INSTALL_CHANNEL" = "main" ]; then
+    release_tag="$MAIN_RELEASE_TAG"
+    return
+  fi
+
+  if [ -z "$version" ]; then
+    latest_tag="$(resolve_latest_tag_from_web)" \
+      || die "Could not resolve the latest release from github.com either. Retry later, or pin one with --version."
+    version="${latest_tag#v}"
+  fi
+  release_tag="v${version}"
 }
 
 select_archive_asset() {

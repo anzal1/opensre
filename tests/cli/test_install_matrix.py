@@ -131,6 +131,8 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
             set -euo pipefail
             out=""
             url=""
+            head=0
+            write_out=""
             args=("$@")
             i=0
             while [ "$i" -lt "${{#args[@]}}" ]; do
@@ -140,6 +142,11 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
                   i=$((i + 1))
                   out="${{args[$i]}}"
                   ;;
+                -w|--write-out)
+                  i=$((i + 1))
+                  write_out="${{args[$i]}}"
+                  ;;
+                -I|--head) head=1 ;;
                 -H|--header|--retry|--retry-delay) i=$((i + 1)) ;;
                 --fail|--silent|--show-error|--location) ;;
                 http://*|https://*) url="$arg" ;;
@@ -149,6 +156,25 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
             [ -n "$url" ] || {{ echo "curl-shim: missing url: $*" >&2; exit 2; }}
             map={json.dumps(str(mapping_path))}
             assets={json.dumps(str(assets_dir))}
+            if [ "$url" = "https://api.github.com/rate_limit" ]; then
+              remaining="${{OPENSRE_TEST_GITHUB_RATE_LIMIT_REMAINING:-60}}"
+              printf '{{"resources":{{"core":{{"limit":60,"remaining":%s}}}}}}' "$remaining"
+              exit 0
+            fi
+            if printf '%s' "$url" | grep -q 'api.github.com' \
+              && [ -n "${{OPENSRE_TEST_GITHUB_API_STATUS:-}}" ]; then
+              echo "curl: (56) The requested URL returned error: $OPENSRE_TEST_GITHUB_API_STATUS" >&2
+              exit 22
+            fi
+            if printf '%s' "$url" | grep -q '/releases/latest$' \
+              && ! printf '%s' "$url" | grep -q 'api.github.com'; then
+              tag="${{OPENSRE_TEST_WEB_LATEST_TAG:-}}"
+              [ -n "$tag" ] || {{ echo "curl-shim: no web latest tag" >&2; exit 1; }}
+              if [ "$write_out" = "%{{redirect_url}}" ]; then
+                printf '%s' "${{url%/latest}}/tag/$tag"
+              fi
+              exit 0
+            fi
             if printf '%s' "$url" | grep -q 'api.github.com'; then
               body="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$map" "$url")"
               if [ -n "$out" ]; then printf '%s' "$body" >"$out"; else printf '%s' "$body"; fi
@@ -157,7 +183,8 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
             if printf '%s' "$url" | grep -q 'releases/download/'; then
               name="$(basename "$url")"
               src="$assets/$name"
-              [ -f "$src" ] || {{ echo "curl-shim: missing asset $src for $url" >&2; exit 1; }}
+              [ -f "$src" ] || {{ echo "curl-shim: missing asset $src for $url" >&2; exit 22; }}
+              if [ "$head" -eq 1 ]; then exit 0; fi
               if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
               exit 0
             fi
@@ -547,6 +574,59 @@ def test_install_sh_release_latest_end_to_end(tmp_path: Path) -> None:
         check=False,
     )
     assert "2026.4.29" in version.stdout
+
+
+_RATE_LIMITED = {
+    "OPENSRE_TEST_GITHUB_API_STATUS": "403",
+    "OPENSRE_TEST_GITHUB_RATE_LIMIT_REMAINING": "0",
+    "OPENSRE_TEST_WEB_LATEST_TAG": "v2026.4.29",
+}
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_version"),
+    [
+        (("--release",), "2026.4.29"),
+        (("--version", "2026.4.29"), "2026.4.29"),
+        (("--main",), "main @ deadbeef"),
+    ],
+)
+def test_install_sh_falls_back_to_github_web_when_api_rate_limited(
+    tmp_path: Path, args: tuple[str, ...], expected_version: str
+) -> None:
+    """#6496: an exhausted anonymous API quota must not block the install."""
+    result = _run_install_sh(tmp_path, *args, env_extra=_RATE_LIMITED)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "GitHub API rate limit reached" in combined
+    assert "Checksum verification passed" in combined
+    installed = tmp_path / "opt" / "bin" / "opensre"
+    version = subprocess.run(
+        [str(installed), "--version"], capture_output=True, text=True, check=False
+    )
+    assert expected_version in version.stdout
+
+
+def test_install_sh_does_not_mask_api_failures_that_are_not_rate_limits(
+    tmp_path: Path,
+) -> None:
+    """A 403 with quota left (proxy, outage) keeps failing loudly."""
+    result = _run_install_sh(
+        tmp_path,
+        "--release",
+        env_extra={**_RATE_LIMITED, "OPENSRE_TEST_GITHUB_RATE_LIMIT_REMAINING": "42"},
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Failed to query release metadata from GitHub." in combined
+    assert "rate limit" not in combined
+
+
+def test_install_sh_web_fallback_reports_missing_asset(tmp_path: Path) -> None:
+    result = _run_install_sh(tmp_path, "--version", "2099.1.1", env_extra=_RATE_LIMITED)
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Release v2099.1.1 does not include asset" in combined
 
 
 def test_install_sh_rejects_version_with_main(tmp_path: Path) -> None:
