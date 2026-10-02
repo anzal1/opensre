@@ -297,6 +297,8 @@ def _sum_text_chars(node: Any) -> int:
     """
     total = 0
     if isinstance(node, dict):
+        if _is_thinking_block(node):  # signed: shrinking it breaks the signature
+            return 0
         for key, value in node.items():
             if isinstance(value, str) and key in ("content", "text"):
                 total += len(value)
@@ -316,6 +318,8 @@ def _apply_text_factor(node: Any, factor: float) -> bool:
     length, mutating in place. Returns whether anything changed."""
     changed = False
     if isinstance(node, dict):
+        if _is_thinking_block(node):
+            return False
         for key, value in node.items():
             if isinstance(value, str) and key in ("content", "text"):
                 new_value, slot_changed = _shrink_text(value, max(int(len(value) * factor), 0))
@@ -397,8 +401,9 @@ def _truncate_largest_message(
 # accounts created on or after 2026-08-31; Anthropic's documented recovery is
 # to drop those blocks. Blocks before the first edit still verify and are kept,
 # along with the cached prefix up to that point. ``reasoningContent`` is the
-# Bedrock Converse spelling of the same block.
+# Bedrock Converse spelling of the same block, ``thinking_blocks`` LiteLLM's.
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+_THINKING_PLACEHOLDER = "[reasoning omitted]"
 
 
 def _min_index(current: int | None, candidate: int) -> int:
@@ -414,21 +419,35 @@ def _is_thinking_block(block: Any) -> bool:
 def _strip_thinking_blocks_from(messages: list[dict[str, Any]], start: int) -> None:
     """Drop thinking blocks from assistant turns at ``start`` and after.
 
-    Replaces each changed message dict rather than mutating it, because the
-    trimmed list can share message dicts with the caller's transcript. A turn
-    holding nothing but thinking is left alone: an empty assistant turn is
-    itself a 400.
+    Edits each turn's block list in place. The request copy is shallow, so those
+    lists are shared with the caller's transcript, and truncation already
+    shortens shared tool results in place: the invalidated blocks have to leave
+    the transcript too, or the next request (which may need no edit at all)
+    would send them again. A turn left empty gets a short text block, because an
+    empty assistant turn is itself a 400.
     """
-    for idx in range(start, len(messages)):
-        message = messages[idx]
+    for message in messages[start:]:
         if message.get("role") != "assistant":
             continue
+        litellm_blocks = message.get("thinking_blocks")
+        if isinstance(litellm_blocks, list):
+            litellm_blocks.clear()
         content = message.get("content")
         if not isinstance(content, list):
             continue
         kept = [block for block in content if not _is_thinking_block(block)]
-        if kept and len(kept) != len(content):
-            messages[idx] = {**message, "content": kept}
+        if len(kept) == len(content):
+            continue
+        if not kept:
+            bedrock = any(
+                isinstance(block, dict) and "reasoningContent" in block for block in content
+            )
+            kept = [
+                {"text": _THINKING_PLACEHOLDER}
+                if bedrock
+                else {"type": "text", "text": _THINKING_PLACEHOLDER}
+            ]
+        content[:] = kept
 
 
 def enforce_context_budget(
