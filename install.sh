@@ -335,13 +335,20 @@ release_has_asset() {
   local asset_name="$2"
 
   if [ "$RELEASE_METADATA_SOURCE" = "web" ]; then
-    # No asset list without the API, so ask the download URL directly.
-    curl --fail --silent --location --head --retry 3 --retry-delay 1 \
+    # No asset list without the API, so ask the download URL directly. Only a
+    # 404 means "not published": treating a timeout or 5xx the same way would
+    # skip checksum verification or pick the wrong architecture.
+    local status
+    status="$(curl --silent --location --head --retry 3 --retry-delay 1 \
       -H "User-Agent: opensre-install-script" \
-      -o /dev/null \
+      -o /dev/null -w '%{http_code}' \
       "https://github.com/${REPO}/releases/download/${release_tag}/${asset_name}" \
-      >/dev/null 2>&1
-    return
+      2>/dev/null)" || status="000"
+    case "$status" in
+      2??) return 0 ;;
+      404) return 1 ;;
+      *) die "Could not check for release asset '${asset_name}' on github.com (HTTP ${status}). Retry later." ;;
+    esac
   fi
 
   printf '%s' "$release_json" | tr -d '\r\n\t ' | grep -F "\"name\":\"${asset_name}\"" >/dev/null 2>&1
@@ -373,9 +380,14 @@ resolve_latest_tag_from_web() {
     "https://github.com/${REPO}/releases/latest")" || return 1
 
   case "$location" in
-    */releases/tag/?*) printf '%s\n' "${location##*/releases/tag/}" ;;
+    */releases/tag/?*) ;;
     *) return 1 ;;
   esac
+
+  location="${location##*/releases/tag/}"
+  location="${location%%[/?#]*}"
+  [ -n "$location" ] || return 1
+  printf '%s\n' "$location"
 }
 
 build_archive_name() {

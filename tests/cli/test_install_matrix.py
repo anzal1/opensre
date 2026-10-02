@@ -183,8 +183,15 @@ def _write_curl_shim(bin_dir: Path, assets_dir: Path, release_json_by_url: dict[
             if printf '%s' "$url" | grep -q 'releases/download/'; then
               name="$(basename "$url")"
               src="$assets/$name"
+              if [ "$head" -eq 1 ] && [ "$write_out" = "%{{http_code}}" ]; then
+                status="${{OPENSRE_TEST_WEB_HEAD_STATUS:-}}"
+                if [ -z "$status" ]; then
+                  if [ -f "$src" ]; then status=200; else status=404; fi
+                fi
+                printf '%s' "$status"
+                exit 0
+              fi
               [ -f "$src" ] || {{ echo "curl-shim: missing asset $src for $url" >&2; exit 22; }}
-              if [ "$head" -eq 1 ]; then exit 0; fi
               if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
               exit 0
             fi
@@ -627,6 +634,31 @@ def test_install_sh_web_fallback_reports_missing_asset(tmp_path: Path) -> None:
     combined = result.stdout + result.stderr
     assert result.returncode != 0
     assert "Release v2099.1.1 does not include asset" in combined
+
+
+def test_install_sh_web_fallback_fails_instead_of_skipping_checks_on_flaky_probes(
+    tmp_path: Path,
+) -> None:
+    """A 5xx on the asset probe must not read as "no checksum published"."""
+    result = _run_install_sh(
+        tmp_path,
+        "--release",
+        env_extra={**_RATE_LIMITED, "OPENSRE_TEST_WEB_HEAD_STATUS": "503"},
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Could not check for release asset" in combined
+    assert "HTTP 503" in combined
+    assert not (tmp_path / "opt" / "bin" / "opensre").exists()
+
+
+def test_install_sh_web_fallback_ignores_trailing_redirect_noise(tmp_path: Path) -> None:
+    result = _run_install_sh(
+        tmp_path,
+        "--release",
+        env_extra={**_RATE_LIMITED, "OPENSRE_TEST_WEB_LATEST_TAG": "v2026.4.29/?ref=x"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_install_sh_rejects_version_with_main(tmp_path: Path) -> None:
