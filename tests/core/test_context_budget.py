@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from core.context_budget import (
     _TOKENS_PER_CHAR,
+    _TRUNCATION_MARKER,
     context_budget_ceiling_for_model,
     enforce_context_budget,
     estimate_message_tokens,
@@ -245,3 +246,140 @@ def test_enforce_context_budget_still_trims_when_over_ceiling_with_tools() -> No
 
     assert estimate_message_tokens(messages, tools=tools) <= ceiling
     assert len(messages) < 5
+
+
+class TestThinkingBlocksAfterContextEdits:
+    """Thinking blocks after a trimmed or truncated message no longer verify (#6497).
+
+    Claude Sonnet 5.5, Opus 5.5 and Fable 5.1 reject such a request with a 400
+    on accounts created on or after 2026-08-31, so the budget pass drops them.
+    """
+
+    @staticmethod
+    def _transcript() -> list[dict]:
+        def assistant(tool_id: str, thought: str) -> dict:
+            return {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": thought, "signature": f"sig-{tool_id}"},
+                    {"type": "tool_use", "id": tool_id, "name": "noop", "input": {}},
+                ],
+            }
+
+        def result(tool_id: str, size: int) -> dict:
+            return {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "x" * size}],
+            }
+
+        return [
+            {"role": "user", "content": "investigate checkout-api latency"},
+            assistant("t1", "look at metrics"),
+            result("t1", 8000),
+            assistant("t2", "look at logs"),
+            result("t2", 8000),
+            assistant("t3", "look at deploys"),
+            result("t3", 100),
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "text", "text": "rolled back"},
+                ],
+            },
+        ]
+
+    @staticmethod
+    def _has_thinking(message: dict) -> bool:
+        content = message.get("content")
+        return isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+            for block in content
+        )
+
+    def test_untouched_history_keeps_every_thinking_block(self) -> None:
+        messages = self._transcript()
+        original = json.loads(json.dumps(messages))
+
+        enforce_context_budget(messages, fixed_overhead_tokens=0, ceiling=1_000_000)
+
+        assert messages == original
+
+    def test_only_blocks_with_an_intact_prefix_survive_a_trim(self) -> None:
+        messages = self._transcript()
+        original = json.loads(json.dumps(messages))
+
+        enforce_context_budget(messages, fixed_overhead_tokens=0, ceiling=2_500)
+
+        assert len(messages) < len(original)
+        for idx, message in enumerate(messages):
+            if self._has_thinking(message):
+                # Every kept block must sit on exactly the prefix that produced it.
+                assert messages[: idx + 1] == original[: idx + 1]
+        # The edit is after the opening prompt, so the final turn always loses its block.
+        assert not self._has_thinking(messages[-1])
+        assert messages[-1]["content"] == [{"type": "text", "text": "rolled back"}]
+
+    def test_truncation_also_drops_later_thinking_blocks(self) -> None:
+        messages = self._transcript()[:3]
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "done", "signature": "sig-end"},
+                    {"type": "text", "text": "summary"},
+                ],
+            }
+        )
+
+        # Only the opening prompt and one exchange: nothing to trim, so the
+        # tool result is truncated in place instead.
+        with patch("core.context_budget._tool_exchange_candidates", return_value=[]):
+            enforce_context_budget(messages, fixed_overhead_tokens=0, ceiling=600)
+
+        assert messages[2]["content"][0]["content"].endswith(_TRUNCATION_MARKER)
+        assert self._has_thinking(messages[1])  # before the truncated message
+        assert not self._has_thinking(messages[3])  # after it
+
+    def test_shared_message_dicts_are_not_mutated(self) -> None:
+        from core.context_budget import _strip_thinking_blocks_from
+
+        transcript = self._transcript()
+        request_copy = list(transcript)  # shallow, like the agent's converted copy
+
+        _strip_thinking_blocks_from(request_copy, 0)
+
+        assert all(not self._has_thinking(m) for m in request_copy)
+        assert self._has_thinking(transcript[1])  # the stored transcript keeps its blocks
+
+    def test_sdk_objects_and_bedrock_reasoning_blocks_are_recognised(self) -> None:
+        from types import SimpleNamespace
+
+        from core.context_budget import _strip_thinking_blocks_from
+
+        tool_use = SimpleNamespace(type="tool_use", id="t1", name="noop", input={})
+        messages = [
+            {
+                "role": "assistant",
+                "content": [SimpleNamespace(type="thinking", thinking="x"), tool_use],
+            },
+            {
+                "role": "assistant",
+                "content": [{"reasoningContent": {"reasoningText": {"text": "x"}}}, {"text": "ok"}],
+            },
+        ]
+
+        _strip_thinking_blocks_from(messages, 0)
+
+        assert messages[0]["content"] == [tool_use]
+        assert messages[1]["content"] == [{"text": "ok"}]
+
+    def test_a_turn_that_is_only_thinking_is_left_alone(self) -> None:
+        from core.context_budget import _strip_thinking_blocks_from
+
+        only_thinking = {"role": "assistant", "content": [{"type": "thinking", "thinking": "x"}]}
+        messages = [only_thinking]
+
+        _strip_thinking_blocks_from(messages, 0)
+
+        assert messages == [only_thinking]

@@ -362,15 +362,15 @@ def _truncate_largest_message(
     total_message_tokens: int,
     fixed_overhead_tokens: int,
     ceiling: int,
-) -> tuple[bool, int]:
+) -> tuple[int | None, int]:
     """Truncate the biggest still-shrinkable message so the prompt fits.
 
     Tries messages largest-first (so an untruncatable assistant ``tool_calls``
     turn doesn't block a truncatable tool-result behind it) and stops at the
     first one that actually shrinks. Each successful call strictly reduces the
-    total, guaranteeing the caller's loop terminates. Returns False when no
-    message can be shrunk further — the caller then lets the API surface the
-    error rather than spinning.
+    total, guaranteeing the caller's loop terminates. Returns the index of the
+    truncated message, or None when no message can be shrunk further — the
+    caller then lets the API surface the error rather than spinning.
     """
     order = sorted(
         range(len(messages)),
@@ -387,8 +387,48 @@ def _truncate_largest_message(
             updated_tokens = _message_token_estimate(messages[idx])
             total_message_tokens += updated_tokens - message_tokens[idx]
             message_tokens[idx] = updated_tokens
-            return True, total_message_tokens
-    return False, total_message_tokens
+            return idx, total_message_tokens
+    return None, total_message_tokens
+
+
+# Anthropic signs each thinking block against everything before it, so a block
+# that follows a trimmed or truncated message no longer verifies. Claude
+# Sonnet 5.5, Opus 5.5 and Fable 5.1 reject such a request with a 400 on
+# accounts created on or after 2026-08-31; Anthropic's documented recovery is
+# to drop those blocks. Blocks before the first edit still verify and are kept,
+# along with the cached prefix up to that point. ``reasoningContent`` is the
+# Bedrock Converse spelling of the same block.
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def _min_index(current: int | None, candidate: int) -> int:
+    return candidate if current is None else min(current, candidate)
+
+
+def _is_thinking_block(block: Any) -> bool:
+    if isinstance(block, dict):
+        return block.get("type") in _THINKING_BLOCK_TYPES or "reasoningContent" in block
+    return getattr(block, "type", None) in _THINKING_BLOCK_TYPES
+
+
+def _strip_thinking_blocks_from(messages: list[dict[str, Any]], start: int) -> None:
+    """Drop thinking blocks from assistant turns at ``start`` and after.
+
+    Replaces each changed message dict rather than mutating it, because the
+    trimmed list can share message dicts with the caller's transcript. A turn
+    holding nothing but thinking is left alone: an empty assistant turn is
+    itself a 400.
+    """
+    for idx in range(start, len(messages)):
+        message = messages[idx]
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        kept = [block for block in content if not _is_thinking_block(block)]
+        if kept and len(kept) != len(content):
+            messages[idx] = {**message, "content": kept}
 
 
 def enforce_context_budget(
@@ -409,31 +449,36 @@ def enforce_context_budget(
         fixed_overhead_tokens = system_and_tools_overhead(system, tools)
     # Per-message ledger: estimate once, then adjust only on trim / truncate.
     message_tokens, total_message_tokens = _message_token_estimates(messages)
+    first_edited: int | None = None
     while (total_message_tokens + fixed_overhead_tokens) > ceiling:
         removed = _trim_lowest_value_tool_pair(messages, message_tokens=message_tokens)
         if removed is None:
-            changed, total_message_tokens = _truncate_largest_message(
+            truncated, total_message_tokens = _truncate_largest_message(
                 messages,
                 message_tokens=message_tokens,
                 total_message_tokens=total_message_tokens,
                 fixed_overhead_tokens=fixed_overhead_tokens,
                 ceiling=ceiling,
             )
-            if not changed:
+            if truncated is None:
                 logger.warning(
                     "[agent] context still over budget after trimming + truncation "
                     "(ceiling=%d); letting the request proceed",
                     ceiling,
                 )
-                return
+                break
+            first_edited = _min_index(first_edited, truncated)
             logger.warning(
                 "[agent] truncated oversized message to fit context budget (ceiling=%d)", ceiling
             )
             continue
         start, end = removed
+        first_edited = _min_index(first_edited, start)
         total_message_tokens = _ledger_remove_range(
             message_tokens, total_message_tokens, start=start, end=end
         )
         logger.warning(
             "[agent] trimmed low-value tool pair to fit context budget (ceiling=%d)", ceiling
         )
+    if first_edited is not None:
+        _strip_thinking_blocks_from(messages, first_edited)
